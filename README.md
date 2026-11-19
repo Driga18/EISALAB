@@ -25,7 +25,8 @@ The SQLite database and result PDFs are stored on the volume, so they persist ac
 
 ## Exam workflow
 
-- The simulated **Create a resource** hub lets students create resource groups, virtual networks and subnets, VMs, and attached data disks. VM deployment also provisions its NIC, public IP (if selected), network security group, and OS disk.
+- The simulated **Create a resource** hub lets students create resource groups, virtual networks and subnets, VMs, and attached data disks. VM images include Ubuntu, Debian, AlmaLinux, Red Hat Enterprise Linux, SUSE Linux Enterprise Server, Windows 11 Enterprise, and Windows Server 2022/2025. VM deployment also provisions its NIC, public IP (if selected), network security group, and OS disk.
+- The VM image list is for Azure portal/resource-creation practice; the interactive terminal and scored exam tasks remain Ubuntu-based. Students should choose Ubuntu Server 22.04 for the exam.
 - **Section A · Theory** provides the 13 written-response questions from the exam. Responses autosave and are included in the submission PDF for facilitator review; they are not automatically graded.
 - Students sign in using the ID and password issued by the teacher. Their work autosaves to the server and can be resumed on another device.
 - Students use **Submit mock exam** on the task panel or Results report. Submission locks their work.
