@@ -26,11 +26,11 @@ code{font-size:13px}.credentials{max-height:380px;overflow:auto}@media print{.no
       <label for="password">Teacher password</label>
       <input id="password" type="password" autocomplete="current-password" required>
       <p class="error" id="loginError" role="alert"></p>
-      <div class="bar"><button type="submit">Sign in</button><a class="button secondary" href="/">Student exam</a></div>
+      <div class="bar"><button type="submit">Sign in</button><a class="button secondary" href="index.html">Student exam</a></div>
     </form>
   </section>
   <section id="teacherPanel" hidden>
-    <header class="bar noprint"><div style="flex:1"><h1 style="margin-bottom:4px">Mock exam administration</h1><span class="muted">Create student accounts and review submissions.</span></div><a class="button secondary" href="/">Open student exam</a><button class="secondary" id="logout">Sign out</button></header>
+    <header class="bar noprint"><div style="flex:1"><h1 style="margin-bottom:4px">Mock exam administration</h1><span class="muted">Create student accounts and review submissions.</span></div><a class="button secondary" href="index.html">Open student exam</a><button class="secondary" id="logout">Sign out</button></header>
     <section class="panel noprint">
       <h2>Create student accounts</h2>
       <p class="muted">Enter up to 50 names, one per line. Each account is created once; download or print the credentials before leaving this page. Passwords cannot be viewed again.</p>
@@ -82,6 +82,11 @@ async function showTeacher() {
   catch (error) { document.querySelector("#resultsError").textContent = error.message; }
 }
 async function boot() {
+  if (window.location.protocol === "file:") {
+    document.querySelector("#loginPanel").hidden = false;
+    document.querySelector("#loginError").textContent = "To sign in, run python server.py and open http://localhost:8080/teacher.html. Opening this file directly cannot connect to the exam server.";
+    return;
+  }
   try {
     const me = await api("/api/me");
     if (me.user?.role === "teacher") return showTeacher();

@@ -203,7 +203,7 @@ textarea{font-family:var(--mono);font-size:13px}
     <div class="field"><label for="loginId">Student ID</label><input id="loginId" type="text" autocomplete="username" required></div>
     <div class="field"><label for="loginPassword">Password</label><input id="loginPassword" type="password" autocomplete="current-password" required></div>
     <p class="err" id="loginError" role="alert"></p>
-    <div class="gate-actions"><button class="btn primary" type="submit">Sign in</button><a class="btn" href="/teacher.html">Teacher sign in</a></div>
+    <div class="gate-actions"><button class="btn primary" type="submit">Sign in</button><a class="btn" href="teacher.html">Teacher sign in</a></div>
   </form>
 </section>
 <section class="gate" id="submittedScreen" hidden>
@@ -285,7 +285,7 @@ const KERNEL = "6.8.0-1017-azure";
 function freshState() {
   return {
     v: 1, startedAt: now(), learner: "", practice: true, page: "home", pageArg: null, vmTab: "overview",
-    vms: [], vnets: [], activity: [], evidence: [], flags: {}, research: { name: "", cve: "", severity: "", source: "" },
+    vms: [], vnets: [], resourceGroups: RGS.slice(), resourceGroupLocations: Object.fromEntries(RGS.map((name) => [name, REGIONS[0]])), activity: [], evidence: [], flags: {}, research: { name: "", cve: "", severity: "", source: "" },
     scenario2: false, scenario3: false, metrics: [], openTask: "t1", notes: "",
   };
 }
@@ -320,6 +320,7 @@ function act(op, target, status = "Succeeded") { S.activity.unshift({ t: now(), 
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => (t.hidden = true), 3200); }
 const vmById = (id) => S.vms.find((v) => v.id === id);
 const sizeOf = (vm) => SIZES.find((s) => s.name === vm.size) || SIZES[1];
+function resourceGroups() { return [...new Set([...RGS, ...(Array.isArray(S.resourceGroups) ? S.resourceGroups : [])])]; }
 function rid() { return Math.random().toString(36).slice(2, 10); }
 function hex(n) { let s = ""; for (let i = 0; i < n; i++) s += "0123456789abcdef"[Math.floor(Math.random() * 16)]; return s; }
 function uuid() { return `${hex(8)}-${hex(4)}-4${hex(3)}-a${hex(3)}-${hex(12)}`; }
@@ -1036,6 +1037,7 @@ $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") clos
 
 /* ---------------- portal: navigation ---------------- */
 const ICONS = {
+  plus: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 2v12M2 8h12"/></svg>',
   home: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 7.5 8 2.5l6 5V14H10v-4H6v4H2z"/></svg>',
   vm: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.5" y="2.5" width="13" height="9" rx="1"/><path d="M5 14h6M8 11.5V14"/></svg>',
   net: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="3" cy="8" r="1.6"/><circle cx="13" cy="3.5" r="1.6"/><circle cx="13" cy="12.5" r="1.6"/><path d="M4.5 7.3 11.5 4.2M4.5 8.7l7 3.1"/></svg>',
@@ -1046,23 +1048,25 @@ const ICONS = {
   rep: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h7l3 3v8H3z"/><path d="m5.5 9 1.7 1.7L10.5 7"/></svg>',
   web: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12"/></svg>',
 };
-const NAV = [["home", "Home"], ["vms", "Virtual machines", "vm"], ["vnets", "Virtual networks", "net"], ["disks", "Disks", "disk"], ["monitor", "Monitor", "mon"], ["activity", "Activity log", "log"], ["browser", "Web browser", "web"], null, ["evidence", "Evidence", "ev"], ["report", "Results report", "rep"]];
+const NAV = [["createResource", "Create a resource", "plus"], ["theory", "Section A · Theory", "rep"], ["home", "Home"], ["vms", "Virtual machines", "vm"], ["vnets", "Virtual networks", "net"], ["disks", "Disks", "disk"], ["monitor", "Monitor", "mon"], ["activity", "Activity log", "log"], ["browser", "Web browser", "web"], null, ["evidence", "Evidence", "ev"], ["report", "Results report", "rep"]];
 function renderRail() { $("#rail").innerHTML = NAV.map((n) => (n ? `<button type="button" data-nav="${n[0]}" class="${S.page === n[0] || (n[0] === "vms" && S.page === "vm") || (n[0] === "vms" && S.page === "create") ? "active" : ""}">${ICONS[n[2] || n[0]]}${n[1]}</button>` : '<div class="sep"></div>')).join(""); }
 function go(page, arg = null, tab = null) { S.page = page; S.pageArg = arg; if (tab) S.vmTab = tab; save(); renderRail(); renderBlade(); $("#blade").scrollTop = 0; }
 $("#rail").addEventListener("click", (e) => { const b = e.target.closest("[data-nav]"); if (b) go(b.dataset.nav); });
-$("#topSearch").addEventListener("keydown", (e) => { if (e.key !== "Enter") return; const q = e.target.value.toLowerCase(); if (/virtual m|vm/.test(q)) go("vms"); else if (/net/.test(q)) go("vnets"); else if (/disk/.test(q)) go("disks"); else if (/monitor|metric/.test(q)) go("monitor"); else if (/log|activity/.test(q)) go("activity"); else { const vm = S.vms.find((v) => v.name.toLowerCase().includes(q)); if (vm) go("vm", vm.id, "overview"); else toast("No resources match “" + e.target.value + "”."); } e.target.value = ""; });
+$("#topSearch").addEventListener("keydown", (e) => { if (e.key !== "Enter") return; const q = e.target.value.toLowerCase(); if (/create|resource/.test(q)) go("createResource"); else if (/virtual m|vm/.test(q)) go("vms"); else if (/net/.test(q)) go("vnets"); else if (/disk/.test(q)) go("disks"); else if (/monitor|metric/.test(q)) go("monitor"); else if (/log|activity/.test(q)) go("activity"); else { const vm = S.vms.find((v) => v.name.toLowerCase().includes(q)); if (vm) go("vm", vm.id, "overview"); else toast("No resources match “" + e.target.value + "”."); } e.target.value = ""; });
 
 /* ---------------- portal pages ---------------- */
 function statusPill(st) { const c = st === "Running" ? "ok" : /Stopp|Dealloc/.test(st) ? "bad" : "warn"; return `<span class="pill ${c}">${esc(st)}</span>`; }
 function renderBlade() {
   const b = $("#blade"); const p = S.page;
   try {
+    if (p === "createResource") { b.innerHTML = pageCreateResource(); bindCreateResource(); return; }
+    if (p === "theory") { b.innerHTML = pageTheory(); bindTheory(); return; }
     if (p === "home") b.innerHTML = pageHome();
     else if (p === "vms") b.innerHTML = pageVms();
     else if (p === "create") { b.innerHTML = pageCreate(); bindCreate(); return; }
     else if (p === "vm") { const vm = vmById(S.pageArg); if (!vm) { go("vms"); return; } b.innerHTML = pageVm(vm); bindVm(vm); return; }
-    else if (p === "vnets") b.innerHTML = pageVnets();
-    else if (p === "disks") b.innerHTML = pageDisks();
+    else if (p === "vnets") { b.innerHTML = pageVnets(); bindVnets(); return; }
+    else if (p === "disks") { b.innerHTML = pageDisks(); bindDisks(); return; }
     else if (p === "monitor") { b.innerHTML = pageMonitor(); bindMonitor(); return; }
     else if (p === "activity") b.innerHTML = pageActivity();
     else if (p === "browser") { b.innerHTML = pageBrowser(); bindBrowser(); return; }
@@ -1074,7 +1078,8 @@ function pageHome() {
   const vm = S.vms[0];
   return `<h1>Welcome${S.learner ? ", " + esc(S.learner) : ""}</h1><p class="sub">Practise the Cloud Administrator mock EISA practical in a simulated cloud. Nothing here is real or costs money – you can break it and reset it.</p>
   <div class="cards">
-    <button class="card" type="button" data-go="create"><b>Create a virtual machine</b><span>Start Task 1.1: deploy Traffic-Node-1</span></button>
+    <button class="card" type="button" data-go="createResource"><b>Create a resource</b><span>Deploy the cloud resources used in the exam</span></button>
+    <button class="card" type="button" data-go="theory"><b>Section A · Theory</b><span>Answer the written questions and save your responses</span></button>
     <button class="card" type="button" data-go="vms"><b>Virtual machines</b><span>${S.vms.length} deployed</span></button>
     <button class="card" type="button" data-go="browser"><b>Web browser</b><span>Open the control panel (Task 1.2)</span></button>
     <button class="card" type="button" data-go="report"><b>Results report</b><span>See your progress and copy your report</span></button>
@@ -1087,10 +1092,62 @@ function pageHome() {
   </div>
   ${vm ? `<h2>Recent resources</h2>${vmTable()}` : ""}`;
 }
+const THEORY_QUESTIONS = [
+  { section: "Question 1 · Implement the Cloud Management Service", marks: 12, questions: [
+    { id: "1.1", marks: 3, prompt: "StreamMedia Inc. is launching a video-streaming platform and expects 100,000 concurrent users. Identify four bottlenecks: uploads of raw 4K videos up to 50 GB must be converted into five formats; users in Asia and Europe report buffering while servers are in the US; millions of comments and likes per hour overwhelm the SQL database; and recommendations require heavy mathematical processing. Identify the specific infrastructure components required, focusing on Compute types for video conversion versus recommendations, and Network components to solve buffering." },
+    { id: "1.2", marks: 3, prompt: "MultiCloud Enterprises uses three cloud providers. Developers use personal credit cards to create unapproved servers (Shadow IT), 50 idle servers run at 0% CPU (waste), and there is no central view of servers with open Internet ports (security). Explain how a Cloud Management Platform (CMP) addresses Cost Visibility, Governance, and Provisioning." },
+    { id: "1.3", marks: 3, prompt: "GameDev Studios needs three workloads: The Match calculates physics for 100 interacting players in less than 50 ms; The Lobby handles thousands of idle player connections cheaply with latency unimportant; Matchmaking periodically scans for similar-skill players; Replays stores video files after matches. Determine the resources for these workloads, justifying High-Performance Compute for the Match but different resources for the Lobby and Replay storage." },
+    { id: "1.4", marks: 3, prompt: "FinTech Solutions runs a monolithic mobile banking application on large virtual machines. Updating only the Login feature requires restarting the whole banking system, and developers' code works on Windows laptops but breaks on Linux production servers due to missing or different libraries. Explain how Containers and Orchestration (e.g. Kubernetes) solve these two problems." },
+  ] },
+  { section: "Question 2 · Monitor and Maintain Specific Elements of the Cloud", marks: 36, questions: [
+    { id: "2.1", marks: 10, prompt: "GlobalLogistics operates 200 route-management VMs. The OS reached End of Life six months ago and has not been patched because of reboot concerns; the app crashes while RAM is at 99% even though CPU is at 10%; and staff manually clear temporary files on each server monthly, taking 40 hours. Formulate a strategy for Patching, Right-Sizing, and Automation without causing downtime." },
+    { id: "2.2", marks: 10, prompt: "MediaArchive stores 2 PB of footage on Standard Storage at R30 per GB, with high monthly bills. Access patterns: Breaking News (days 0–30) is constantly accessed and needs speed; Recent History (days 31–90) is used occasionally; Deep Archive (day 90+) is rarely watched but must be kept for legal reasons. Design a Storage Lifecycle Policy that moves data between Hot, Cool, and Cold/Archive tiers based on these timeframes to reduce the monthly bill by 65%." },
+    { id: "2.3", marks: 8, prompt: "ShopFast Inc. suspects database storage is causing website slowdowns. Symptom A: the daily backup takes 6 hours instead of 1, slowing the database. Symptom B: customers cannot upload images during peak sales. Describe a monitoring strategy and identify which specific storage metric you would track to diagnose Throughput/Bandwidth versus IOPS for each symptom." },
+    { id: "2.4", marks: 4, prompt: "StartupTech hosts a 200 MB 4K video on its homepage. 10,000 visitors download it daily; data transfer costs R2.00/GB. It also runs a Production-Size database in its Test environment, used by developers only from 9 AM to 5 PM. Calculate the current daily data-transfer cost, then explain how a CDN, Auto-Scheduling, and Caching policies would reduce these costs." },
+    { id: "2.5", marks: 4, prompt: "SecureBank forbids shared root accounts, but a database was deleted at 3 AM using the root login, and there is no way to identify which of five administrators did it. Design a logging framework that ensures Non-Repudiation (proof of who did what) for future incidents." },
+  ] },
+  { section: "Question 3 · Maintain Security Protocols", marks: 12, questions: [
+    { id: "3.1", marks: 3, prompt: "GlobalHealthcare is expanding to Europe and must comply with GDPR Right to Be Forgotten. Mr. Smith's data is in the active database and on 500 backup tapes stored in a vault. The tapes cannot be edited without destroying them. Discuss the governance and technical challenges, and how to comply with the deletion request without destroying disaster-recovery backup integrity." },
+    { id: "3.2", marks: 3, prompt: "InvestCorp is under investigation. Regulators need all emails from 2020, but the IT Manager worries a rogue employee may have altered old emails to hide illegal activity. Explain how WORM (Write Once, Read Many) storage would have protected the company from this risk." },
+    { id: "3.3", marks: 3, prompt: "SaaS-App Inc. has three critical security flaws: (A) the login accepts code in a username field to bypass passwords (SQL Injection); (B) database backups are stored in a public storage bucket; (C) developers hardcoded 'Secret Access Keys' in application text files. For each flaw, provide a specific mitigation strategy (e.g., input validation/WAF, encryption, Secrets Management)." },
+    { id: "3.4", marks: 3, prompt: "GlobalFactory produces 500 cars per day. Downtime costs R100,000 per minute; the business requires Zero Downtime. Its disaster-recovery site currently uses Active-Passive replication: it sits cold and takes 4 hours to turn on. Recommend a recovery approach that meets the availability requirement and explain how it works." },
+  ] },
+];
+function theoryAnswerCount() { return THEORY_QUESTIONS.flatMap((section) => section.questions).filter((question) => String(S.theoryAnswers?.[question.id] || "").trim()).length; }
+function pageTheory() {
+  const answers = S.theoryAnswers || {};
+  const questions = THEORY_QUESTIONS.flatMap((section) => section.questions);
+  return `<div class="crumb"><a data-go="home">Home</a> › Section A</div><h1>Section A · Theory</h1><p class="sub">Answer all 13 written questions from the exam paper. Your responses save automatically and are included in your results PDF.</p>
+    <div class="note warn">Theory responses are saved for your facilitator to review. They are not automatically graded and do not change the simulator's practical score.</div>
+    <p><span class="pill">${theoryAnswerCount()}/${questions.length} answered</span> <span class="pill">${THEORY_QUESTIONS.reduce((sum, section) => sum + section.marks, 0)} marks available</span></p>
+    ${THEORY_QUESTIONS.map((section) => `<section aria-labelledby="theory-${section.questions[0].id}"><h2>${esc(section.section)} <span class="pill">${section.marks} marks</span></h2>${section.questions.map((question) => `<div class="panel" style="margin:12px 0"><h3 id="theory-${question.id}" style="margin-top:0">${question.id} <span class="pill">${question.marks} marks</span></h3><p>${esc(question.prompt)}</p><label for="answer-${question.id}"><b>Your answer</b></label><textarea id="answer-${question.id}" data-theory-answer="${question.id}" rows="${question.marks >= 8 ? 8 : 5}" maxlength="12000" placeholder="Write your answer here...">${esc(answers[question.id] || "")}</textarea></div>`).join("")}</section>`).join("")}
+    <p class="muted" aria-live="polite" id="theorySaveStatus">Answers save automatically · ${theoryAnswerCount()}/${questions.length} answered</p>`;
+}
+function bindTheory() {
+  $("#blade").querySelectorAll("[data-theory-answer]").forEach((field) => {
+    field.oninput = () => {
+    if (!S.theoryAnswers || typeof S.theoryAnswers !== "object" || Array.isArray(S.theoryAnswers)) S.theoryAnswers = {};
+    S.theoryAnswers[field.dataset.theoryAnswer] = field.value;
+    save();
+    const answered = theoryAnswerCount();
+    $("#theorySaveStatus").textContent = `Answers save automatically · ${answered}/${THEORY_QUESTIONS.flatMap((section) => section.questions).length} answered`;
+    };
+  });
+}
+function pageCreateResource() {
+  return `<div class="crumb"><a data-go="home">Home</a></div><h1>Create a resource</h1><p class="sub">Choose a resource to create, as you would from the Azure portal. Everything here is simulated and creates no real Azure resources.</p>
+    <div class="cards">
+      <button class="card" type="button" data-go="create"><b>Virtual machine</b><span>Create a Linux VM, resource group, OS disk, NIC, public IP, and network security group.</span></button>
+      <button class="card" type="button" data-go="vnets"><b>Virtual network</b><span>Create an address space and subnet now, then select it when you deploy a VM.</span></button>
+      <button class="card" type="button" data-go="disks"><b>Managed data disk</b><span>Create and attach an exam data disk to a VM, then partition and mount it in Linux.</span></button>
+      <button class="card" type="button" id="createResourceGroup"><b>Resource group</b><span>Create a container for the resources in your exam.</span></button>
+    </div>
+    <h2>Resources provisioned with the VM</h2><div class="note">The VM deployment wizard also creates the network interface, public IP (if selected), network security group, and OS managed disk. Create the required data disks from <b>Virtual machines → your VM → Disks</b>.</div>`;
+}
 function vmTable() { return `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Status</th><th>Size</th><th>Public IP</th><th>Private IP</th></tr></thead><tbody>${S.vms.map((v) => `<tr><td><button class="link" type="button" data-vm="${v.id}">${esc(v.name)}</button></td><td>${esc(v.rg)}</td><td>${statusPill(v.status)}</td><td>${esc(v.size)}</td><td class="mono">${esc(v.pip || "–")}</td><td class="mono">${esc(v.privateIp)}</td></tr>`).join("")}</tbody></table></div>`; }
 function pageVms() { return `<div class="crumb"><a data-go="home">Home</a></div><h1>Virtual machines</h1><p class="sub">Subscription: Mock EISA lab · Quota used: ${S.vms.reduce((a, v) => a + sizeOf(v).vcpu, 0)} of ${QUOTA} vCPUs (South Africa North)</p><div class="cmdbar"><button class="btn primary" type="button" data-go="create">+ Create</button></div>${S.vms.length ? vmTable() : `<div class="panel"><b>No virtual machines yet.</b><p class="muted">Create one to start Task 1.1.</p><button class="btn primary" type="button" data-go="create">+ Create a virtual machine</button></div>`}`; }
-function pageVnets() { return `<div class="crumb"><a data-go="home">Home</a></div><h1>Virtual networks</h1><p class="sub">Networks are created in the VM wizard (Networking tab ▸ Create new).</p>${S.vnets.length ? `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Address space</th><th>Subnets</th><th>Location</th></tr></thead><tbody>${S.vnets.map((n) => `<tr><td>${esc(n.name)}</td><td>${esc(n.rg)}</td><td class="mono">${esc(n.space)}</td><td>${n.subnets.map((s) => `${esc(s.name)} <span class="mono muted">${esc(s.range)}</span>`).join("<br>")}</td><td>${esc(n.region)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No virtual networks yet.</div>`}`; }
-function pageDisks() { const rows = []; for (const v of S.vms) { rows.push([v.name + "_OsDisk_1", v.rg, v.osDisk, v.osType, "Attached", v.name, "OS"]); for (const d of v.dataDisks) rows.push([d.name, v.rg, d.size, d.sku, "Attached", v.name, "LUN " + d.lun]); } return `<div class="crumb"><a data-go="home">Home</a></div><h1>Disks</h1><p class="sub">Managed disks. Resize a data disk from its VM ▸ Disks page.</p>${rows.length ? `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Size</th><th>Type</th><th>State</th><th>Owner VM</th><th>Role</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td>${r[2]} GiB</td><td>${esc(r[3])}</td><td>${statusPill(r[4]).replace("warn", "ok")}</td><td>${esc(r[5])}</td><td>${esc(r[6])}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No disks yet.</div>`}`; }
+function pageVnets() { return `<div class="crumb"><a data-go="home">Home</a></div><h1>Virtual networks</h1><p class="sub">Create networks here or in the VM wizard. A network needs an address space and at least one subnet.</p><div class="cmdbar"><button class="btn primary" type="button" id="createVnet">+ Create</button></div>${S.vnets.length ? `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Address space</th><th>Subnets</th><th>Location</th></tr></thead><tbody>${S.vnets.map((n) => `<tr><td>${esc(n.name)}</td><td>${esc(n.rg)}</td><td class="mono">${esc(n.space)}</td><td>${n.subnets.map((s) => `${esc(s.name)} <span class="mono muted">${esc(s.range)}</span>`).join("<br>")}</td><td>${esc(n.region)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No virtual networks yet. Create one here or during VM deployment.</div>`}`; }
+function pageDisks() { const rows = []; for (const v of S.vms) { rows.push([v.name + "_OsDisk_1", v.rg, v.osDisk, v.osType, "Attached", v.name, "OS"]); for (const d of v.dataDisks) rows.push([d.name, v.rg, d.size, d.sku, "Attached", v.name, "LUN " + d.lun]); } return `<div class="crumb"><a data-go="home">Home</a></div><h1>Disks</h1><p class="sub">Managed disks. Create and attach an exam data disk to a VM, or resize an attached disk from its VM.</p><div class="cmdbar"><button class="btn primary" type="button" id="createDisk">+ Create and attach</button></div>${rows.length ? `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Size</th><th>Type</th><th>State</th><th>Owner VM</th><th>Role</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td>${r[2]} GiB</td><td>${esc(r[3])}</td><td>${statusPill(r[4]).replace("warn", "ok")}</td><td>${esc(r[5])}</td><td>${esc(r[6])}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No disks yet. Create a VM before attaching an exam data disk.</div>`}`; }
 function pageActivity() { return `<div class="crumb"><a data-go="home">Home</a></div><h1>Activity log</h1><p class="sub">Every change made in this lab, newest first.</p>${S.activity.length ? `<div class="tw"><table class="t"><thead><tr><th>Time (SAST)</th><th>Operation</th><th>Resource</th><th>Status</th><th>Initiated by</th></tr></thead><tbody>${S.activity.slice(0, 120).map((a) => `<tr><td class="mono">${esc(sast(a.t))}</td><td>${esc(a.op)}</td><td>${esc(a.target)}</td><td>${statusPill(a.status).replace("warn", "ok")}</td><td>${esc(a.by)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">Nothing has happened yet.</div>`}`; }
 
 /* ---- create VM wizard ---- */
@@ -1104,7 +1161,7 @@ function pageCreate() {
   let body = "";
   if (W.tab === "basics") body = `<div class="form">
     <h3>Project details</h3>
-    <div class="field"><label for="w_rg">Resource group</label>${sel("w_rg", RGS, W.rg)}</div>
+    <div class="field"><label for="w_rg">Resource group</label>${sel("w_rg", resourceGroups(), W.rg)}</div>
     <h3>Instance details</h3>
     <div class="field"><label for="w_name">Virtual machine name *</label><input id="w_name" type="text" value="${esc(W.name)}">${er("name")}</div>
     <div class="field"><label for="w_region">Region</label>${sel("w_region", REGIONS, W.region)}</div>
@@ -1121,7 +1178,7 @@ function pageCreate() {
     <h3>Data disks</h3><p class="muted">Data disks can be added after the VM is created (VM ▸ Disks).</p></div>`;
   if (W.tab === "networking") {
     const vn = S.vnets.filter((n) => n.region === W.region); const opts = [...vn.map((n) => n.name), ...(W.newVnet ? [W.newVnet.name + " (new)"] : [])];
-    const cur = W.newVnet ? W.newVnet : vn.find((n) => n.name === W.vnet);
+    const cur = W.newVnet || vn.find((n) => n.name === W.vnet) || vn[0];
     body = `<div class="form"><h3>Network interface</h3>
     <div class="field"><label for="w_vnet">Virtual network *</label><div style="display:grid;gap:4px">${opts.length ? `<select id="w_vnet">${opts.map((o) => `<option ${o.replace(" (new)", "") === (cur?.name || "") ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>` : `<span class="muted">No virtual network in ${esc(W.region)} yet.</span>`}<button class="link" type="button" id="w_newvnet" style="justify-self:start">Create new</button></div>${er("vnet")}</div>
     <div class="field"><label>Subnet *</label><div class="mono">${cur ? esc(cur.subnets[0].name + " (" + cur.subnets[0].range + ")") : "–"}</div></div>
@@ -1184,20 +1241,63 @@ function bindCreate() {
   $("#w_review") && ($("#w_review").onclick = () => { readWizard(); W.tab = "review"; renderBlade(); });
   $("#w_cancel").onclick = () => { W = null; go("vms"); };
   b.querySelectorAll('input[name="w_auth"],#w_nsg,input[name="w_inb"],#w_as,#w_region').forEach((x) => (x.onchange = () => { readWizard(); renderBlade(); }));
-  $("#w_newvnet") && ($("#w_newvnet").onclick = () => { readWizard(); vnetModal(); });
+  $("#w_newvnet") && ($("#w_newvnet").onclick = () => { readWizard(); vnetModal(true); });
   $("#w_create") && ($("#w_create").onclick = () => { readWizard(); if (validateWizard().length) { renderBlade(); return; } deployVm(); });
 }
-function vnetModal() {
-  const nm = W.newVnet?.name || (W.rg + "-vnet").replace(/^rg-/, ""); const sp = W.newVnet?.space || "10.1.0.0/16"; const sn = W.newVnet?.subnets[0].name || "default"; const sr = W.newVnet?.subnets[0].range || "10.1.0.0/24";
+function vnetModal(fromWizard = false) {
+  const wizard = fromWizard;
+  const initial = wizard ? W.newVnet : null;
+  const nm = initial?.name || (wizard ? (W.rg + "-vnet").replace(/^rg-/, "") : "vnet-mock-exam");
+  const sp = initial?.space || "10.1.0.0/16"; const sn = initial?.subnets[0].name || "default"; const sr = initial?.subnets[0].range || "10.1.0.0/24";
+  const rg = initial?.rg || (wizard ? W.rg : resourceGroups()[0]); const region = initial?.region || (wizard ? W.region : REGIONS[0]);
   modal(`<h2 style="margin:0">Create virtual network</h2><p class="muted" style="margin:0">The address space is the overall range. The subnet is the part your VM is placed in.</p>
     <div class="form"><div class="field"><label for="nv_name">Name *</label><input id="nv_name" type="text" value="${esc(nm)}"></div>
+    ${wizard ? "" : `<div class="field"><label for="nv_rg">Resource group</label><select id="nv_rg">${resourceGroups().map((g) => `<option ${g === rg ? "selected" : ""}>${esc(g)}</option>`).join("")}</select></div><div class="field"><label for="nv_region">Region</label><select id="nv_region">${REGIONS.map((r) => `<option ${r === region ? "selected" : ""}>${esc(r)}</option>`).join("")}</select></div>`}
     <div class="field"><label for="nv_space">Address space *</label><input id="nv_space" type="text" value="${esc(sp)}"><div class="hint">e.g. 10.0.0.0/16</div></div>
     <div class="field"><label for="nv_sn">Subnet name *</label><input id="nv_sn" type="text" value="${esc(sn)}"></div>
     <div class="field"><label for="nv_sr">Subnet address range *</label><input id="nv_sr" type="text" value="${esc(sr)}"><div class="hint">Must fall inside the address space, e.g. 10.0.0.0/24</div></div>
     <div class="err" id="nv_err"></div></div>
     <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="nv_cancel">Cancel</button><button class="btn primary" type="button" id="nv_ok">OK</button></div>`, () => {
     $("#nv_cancel").onclick = closeModal;
-    $("#nv_ok").onclick = () => { const n = $("#nv_name").value.trim(), s = $("#nv_space").value.trim(), a = $("#nv_sn").value.trim(), r = $("#nv_sr").value.trim(); let err = ""; if (!/^[A-Za-z0-9][\w.\-]{0,62}$/.test(n)) err = "Enter a valid name."; else if (S.vnets.some((x) => x.name === n)) err = "A virtual network with this name already exists."; else if (!cidrOk(s)) err = "The address space must be valid CIDR, e.g. 10.0.0.0/16."; else if (!a) err = "Enter a subnet name."; else if (!cidrOk(r)) err = "The subnet range must be valid CIDR, e.g. 10.0.0.0/24."; else if (!cidrInCidr(r, s)) err = `Subnet ${r} is not within the address space ${s}.`; if (err) { $("#nv_err").textContent = err; return; } W.newVnet = { name: n, space: s, subnets: [{ name: a, range: r }], rg: W.rg, region: W.region }; W.vnet = n; closeModal(); renderBlade(); };
+    $("#nv_ok").onclick = () => {
+      const n = $("#nv_name").value.trim(), s = $("#nv_space").value.trim(), a = $("#nv_sn").value.trim(), subnetRange = $("#nv_sr").value.trim();
+      const group = wizard ? W.rg : $("#nv_rg").value, location = wizard ? W.region : $("#nv_region").value;
+      let err = "";
+      if (!/^[A-Za-z0-9][\w.\-]{0,62}$/.test(n)) err = "Enter a valid name.";
+      else if (S.vnets.some((x) => x.name.toLowerCase() === n.toLowerCase() && (wizard || x.rg === group))) err = "A virtual network with this name already exists.";
+      else if (!cidrOk(s)) err = "The address space must be valid CIDR, e.g. 10.0.0.0/16.";
+      else if (!a) err = "Enter a subnet name.";
+      else if (!cidrOk(subnetRange)) err = "The subnet range must be valid CIDR, e.g. 10.0.0.0/24.";
+      else if (!cidrInCidr(subnetRange, s)) err = `Subnet ${subnetRange} is not within the address space ${s}.`;
+      if (err) { $("#nv_err").textContent = err; return; }
+      const network = { name: n, space: s, subnets: [{ name: a, range: subnetRange }], rg: group, region: location };
+      if (wizard) { W.newVnet = network; W.vnet = n; closeModal(); renderBlade(); return; }
+      S.vnets.push(network); act("Create virtual network " + n, n); save(); closeModal(); renderBlade(); renderDrawer(); toast(`Virtual network created: ${n}`);
+    };
+  });
+}
+function bindCreateResource() { $("#createResourceGroup").onclick = createResourceGroupModal; }
+function bindVnets() { $("#createVnet").onclick = () => vnetModal(false); }
+function bindDisks() { $("#createDisk").onclick = chooseVmForDisk; }
+function createResourceGroupModal() {
+  modal(`<h2 style="margin:0">Create resource group</h2><div class="form"><div class="field"><label for="rg_name">Resource group name *</label><input id="rg_name" type="text" value="rg-new-exam"></div><div class="field"><label for="rg_region">Region</label><select id="rg_region">${REGIONS.map((r, i) => `<option ${i === 0 ? "selected" : ""}>${esc(r)}</option>`).join("")}</select></div><div class="err" id="rg_err"></div></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="rg_cancel">Cancel</button><button class="btn primary" type="button" id="rg_create">Create</button></div>`, () => {
+    $("#rg_cancel").onclick = closeModal;
+    $("#rg_create").onclick = () => {
+      const name = $("#rg_name").value.trim();
+      if (!/^[A-Za-z0-9._()\-]{1,90}$/.test(name)) { $("#rg_err").textContent = "Use 1–90 letters, numbers, periods, underscores, parentheses, or hyphens."; return; }
+      if (resourceGroups().some((group) => group.toLowerCase() === name.toLowerCase())) { $("#rg_err").textContent = "A resource group with this name already exists."; return; }
+      S.resourceGroups = resourceGroups(); S.resourceGroups.push(name);
+      S.resourceGroupLocations = { ...(S.resourceGroupLocations || {}), [name]: $("#rg_region").value };
+      act("Create resource group", name); save(); closeModal(); renderBlade(); toast(`Resource group created: ${name}`);
+    };
+  });
+}
+function chooseVmForDisk() {
+  if (!S.vms.length) { toast("Create a virtual machine before attaching a data disk."); go("create"); return; }
+  if (S.vms.length === 1) { diskModal(S.vms[0]); return; }
+  modal(`<h2 style="margin:0">Choose a virtual machine</h2><p class="muted" style="margin:0">The new managed data disk will be attached to this VM.</p><div class="form"><div class="field"><label for="disk_vm">Virtual machine</label><select id="disk_vm">${S.vms.map((vm) => `<option value="${esc(vm.id)}">${esc(vm.name)} — ${esc(vm.rg)}</option>`).join("")}</select></div></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="disk_vm_cancel">Cancel</button><button class="btn primary" type="button" id="disk_vm_continue">Continue</button></div>`, () => {
+    $("#disk_vm_cancel").onclick = closeModal;
+    $("#disk_vm_continue").onclick = () => { const vm = vmById($("#disk_vm").value); if (!vm) { closeModal(); toast("That virtual machine is no longer available."); return; } closeModal(); diskModal(vm); };
   });
 }
 function deployVm() {
@@ -1486,7 +1586,13 @@ function loadScenario3() {
 /* ---------------- report ---------------- */
 function reportText() {
   const lines = []; const done = CHECKS.filter((c) => checkState(c) === "done").length;
-  lines.push("EISA Cloud Lab – Mock practical results", `Learner: ${S.learner || "(not entered)"}`, `Started: ${sast(S.startedAt)}   Report: ${sast()}   Time used: ${fmtDur(now() - S.startedAt)}`, `Checks passed: ${done} of ${CHECKS.length}`, "");
+  lines.push("EISA Cloud Lab – Mock exam results", `Learner: ${S.learner || "(not entered)"}`, `Started: ${sast(S.startedAt)}   Report: ${sast()}   Time used: ${fmtDur(now() - S.startedAt)}`, `Practical checks passed: ${done} of ${CHECKS.length}`, `Section A theory responses: ${theoryAnswerCount()} of ${THEORY_QUESTIONS.flatMap((section) => section.questions).length} answered (saved for manual review; not automatically graded)`, "");
+  lines.push("SECTION A · THEORY RESPONSES");
+  for (const section of THEORY_QUESTIONS) {
+    lines.push("", `${section.section} (${section.marks} marks)`);
+    for (const question of section.questions) lines.push(`${question.id} (${question.marks} marks):`, S.theoryAnswers?.[question.id]?.trim() || "[No response]", "");
+  }
+  lines.push("", "SECTION B · PRACTICAL CHECKS", "");
   for (const t of TASKS) { lines.push(t.title); for (const c of CHECKS.filter((x) => x.task === t.id)) { const st = checkState(c); lines.push(`  [${st === "done" ? "x" : st === "bad" ? "!" : " "}] ${c.sub} ${c.label}`); } lines.push(""); }
   lines.push("Task 3.2 research:", `  Name: ${S.research.name}`, `  CVE: ${S.research.cve}`, `  Severity: ${S.research.severity}`, `  Source: ${S.research.source}`, "");
   lines.push(`Evidence items: ${S.evidence.length}`); for (const e of S.evidence.slice().reverse()) lines.push(`  ${sast(e.t)}  [${e.task}] ${e.title}`);
@@ -1495,8 +1601,9 @@ function reportText() {
 function fmtDur(ms) { const s = Math.floor(ms / 1000); return [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60].map((x) => String(x).padStart(2, "0")).join(":"); }
 function pageReport() {
   const done = CHECKS.filter((c) => checkState(c) === "done").length;
-  return `<div class="crumb"><a data-go="home">Home</a></div><h1>Results report</h1><p class="sub">${esc(S.learner || "Enter your name in the Exam tasks panel")} · ${done} of ${CHECKS.length} checks passed · time used ${fmtDur(now() - S.startedAt)}</p>
+  return `<div class="crumb"><a data-go="home">Home</a></div><h1>Results report</h1><p class="sub">${esc(S.learner || "Enter your name in the Exam tasks panel")} · ${done} of ${CHECKS.length} practical checks passed · Section A: ${theoryAnswerCount()}/${THEORY_QUESTIONS.flatMap((section) => section.questions).length} answers saved · time used ${fmtDur(now() - S.startedAt)}</p>
   <div class="cmdbar"><button class="btn primary" type="button" id="submitExamReport">Submit mock exam</button><button class="btn" type="button" id="copyRep">Copy report</button><button class="btn" type="button" id="copyEv">Copy report with all evidence</button></div>
+  <div class="panel"><h3 style="margin-top:0">Section A · Theory <span class="pill">${theoryAnswerCount()}/${THEORY_QUESTIONS.flatMap((section) => section.questions).length} answered</span></h3><p class="muted">Written responses are included in the submission PDF for facilitator review. They are not automatically graded.</p><button class="btn" type="button" id="editTheory">Open theory answer sheet</button></div>
   <div class="grid2">${TASKS.map((t) => { const cs = CHECKS.filter((c) => c.task === t.id); const dn = cs.filter((c) => checkState(c) === "done").length; return `<div class="panel"><h3 style="margin-top:0">${esc(t.title)} <span class="pill ${dn === cs.length ? "ok" : dn ? "warn" : ""}">${dn}/${cs.length}</span></h3><ul class="checks">${cs.map((c) => { const st = checkState(c); return `<li class="${st}"><span class="m">${st === "done" ? "✓" : st === "bad" ? "✗" : "○"}</span><span>${c.sub} ${esc(c.label)}</span></li>`; }).join("")}</ul></div>`; }).join("")}</div>
   <h2>Report text</h2><p class="muted">Copy this and send it to your facilitator together with your evidence.</p><textarea id="repTa" rows="14" readonly>${esc(reportText())}</textarea>
   <div class="note" style="margin-top:14px">Your final mark is calculated from these automatic checks. Written evidence and real-world skills are not manually graded by this simulator.</div>`;
@@ -1505,6 +1612,7 @@ function bindReport() {
   const copy = (txt) => { const ta = $("#repTa"); const done = () => toast("Copied to the clipboard."); try { navigator.clipboard.writeText(txt).then(done, () => { ta.value = txt; ta.select(); toast("Press Ctrl+C to copy the selected text."); }); } catch { ta.value = txt; ta.select(); toast("Press Ctrl+C to copy the selected text."); } };
   $("#copyRep").onclick = () => copy(reportText());
   $("#copyEv").onclick = () => copy(reportText() + "\n\n==== EVIDENCE ====\n" + S.evidence.slice().reverse().map((e) => `\n--- ${sast(e.t)} [${e.task}] ${e.title} ---\n${e.body}`).join("\n"));
+  $("#editTheory").onclick = () => go("theory");
   $("#submitExamReport").onclick = submitExam;
 }
 
@@ -1549,6 +1657,7 @@ async function submitExam() {
   clearTimeout(saveT);
   try {
     await saveQueue;
+    await api("/api/state", { method: "PUT", body: JSON.stringify({ state: S }) });
     const submission = await api("/api/submit", { method: "POST", body: JSON.stringify({ state: S }) });
     showSubmitted(submission);
   } catch (error) { toast("Submission failed: " + error.message); }
@@ -1574,6 +1683,11 @@ async function startStudent(me) {
   renderAll();
 }
 async function bootstrap() {
+  if (window.location.protocol === "file:") {
+    $("#authGate").hidden = false;
+    $("#loginError").textContent = "To sign in, run python server.py and open http://localhost:8080. Opening index.html directly cannot connect to the exam server.";
+    return;
+  }
   try {
     const me = await api("/api/me");
     if (!me.user) { $("#authGate").hidden = false; return; }

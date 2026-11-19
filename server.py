@@ -228,6 +228,18 @@ def build_pdf(student_name, student_id, submitted_at, score, passed, checks, sta
     ]
     for label, result in zip(CHECK_LABELS, checks):
         lines.append(f"[{'PASS' if result else 'NOT PASSED'}] {label}")
+    lines.extend(["", "SECTION A - THEORY RESPONSES"])
+    theory_answers = state.get("theoryAnswers") or {}
+    if not isinstance(theory_answers, dict):
+        theory_answers = {}
+    for question_id in (
+        "1.1", "1.2", "1.3", "1.4",
+        "2.1", "2.2", "2.3", "2.4", "2.5",
+        "3.1", "3.2", "3.3", "3.4",
+    ):
+        answer = theory_answers.get(question_id)
+        lines.append(f"Question {question_id}:")
+        lines.extend(str(answer).splitlines() if isinstance(answer, str) and answer.strip() else ["No response."])
     research = state.get("research") or {}
     lines.extend([
         "",
@@ -250,7 +262,7 @@ def build_pdf(student_name, student_id, submitted_at, score, passed, checks, sta
         "",
         "AUTOMATED SIMULATOR RESULT",
         "This mark is calculated from the simulator's automatic checks. It is not a",
-        "manual assessment of written explanations, research quality, or real cloud work.",
+        "manual assessment of Section A theory answers, research quality, or real cloud work.",
     ])
     wrapped = []
     for line in lines:
@@ -405,9 +417,9 @@ class Handler(BaseHTTPRequestHandler):
         path = unquote(parsed.path)
         if path.startswith("/api/"):
             return self.api_get(path, parse_qs(parsed.query))
-        if path == "/":
-            path = "/dashboard.html"
-        if path not in ("/dashboard.html", "/teacher.html"):
+        if path in ("/", "/dashboard.html"):
+            path = "/index.html"
+        if path not in ("/index.html", "/teacher.html"):
             self.send_error(404)
             return
         target = ROOT / path.lstrip("/")

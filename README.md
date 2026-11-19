@@ -7,7 +7,7 @@ The app serves the simulated cloud practical, stores each student's progress in 
 1. Install Python 3.12 or newer.
 2. Set `TEACHER_PASSWORD` to a private password of at least 12 characters.
 3. Run `python server.py` from this folder.
-4. Open `http://localhost:8080`.
+4. Open `http://localhost:8080`. Do not open `index.html` directly from File Explorer; sign-in requires the server.
 5. Open **Teacher sign in** and create student accounts, one name per line.
 
 Local data and generated PDFs are stored in the `data` folder. Keep this folder private and backed up.
@@ -25,6 +25,8 @@ The SQLite database and result PDFs are stored on the volume, so they persist ac
 
 ## Exam workflow
 
+- The simulated **Create a resource** hub lets students create resource groups, virtual networks and subnets, VMs, and attached data disks. VM deployment also provisions its NIC, public IP (if selected), network security group, and OS disk.
+- **Section A · Theory** provides the 13 written-response questions from the exam. Responses autosave and are included in the submission PDF for facilitator review; they are not automatically graded.
 - Students sign in using the ID and password issued by the teacher. Their work autosaves to the server and can be resumed on another device.
 - Students use **Submit mock exam** on the task panel or Results report. Submission locks their work.
 - The result is released five minutes after submission. The student can then download the PDF or open it in a PDF viewer to print. The teacher page lists released marks and allows PDF downloads.
