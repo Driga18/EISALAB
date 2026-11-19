@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EISA Exam - Teacher</title>
+<style>
+:root{font:15px system-ui,sans-serif;color:#18212c;background:#f3f5f8}
+*{box-sizing:border-box}body{margin:0}main{width:min(1100px,100%);margin:0 auto;padding:24px}
+h1{margin-top:0}h2{font-size:18px}.panel{background:#fff;border:1px solid #d5dbe3;border-radius:8px;padding:18px;margin:16px 0}
+label{display:block;font-weight:600;margin:10px 0 5px}input,textarea,button{font:inherit}
+input,textarea{width:100%;padding:9px;border:1px solid #aeb8c4;border-radius:5px}
+textarea{min-height:140px}button,.button{display:inline-block;padding:8px 13px;border:1px solid #1f5fa6;border-radius:5px;background:#1f5fa6;color:white;text-decoration:none;cursor:pointer}
+button:disabled{opacity:.55;cursor:wait}.secondary{background:white;color:#1f5fa6}.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.muted{color:#596675}.error{color:#b3261e;min-height:1.4em}.success{color:#17683f}.scroll{overflow:auto}
+table{width:100%;border-collapse:collapse;min-width:650px}th,td{text-align:left;padding:9px;border-bottom:1px solid #d5dbe3;vertical-align:top}th{background:#eef1f5}
+code{font-size:13px}.credentials{max-height:380px;overflow:auto}@media print{.noprint{display:none!important}.panel{break-inside:avoid}body{background:white}}
+</style>
+</head>
+<body>
+<main>
+  <section id="loginPanel" class="panel" hidden>
+    <h1>Teacher sign in</h1>
+    <p class="muted">Use the teacher password configured on Railway.</p>
+    <form id="loginForm">
+      <label for="password">Teacher password</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+      <p class="error" id="loginError" role="alert"></p>
+      <div class="bar"><button type="submit">Sign in</button><a class="button secondary" href="/">Student exam</a></div>
+    </form>
+  </section>
+  <section id="teacherPanel" hidden>
+    <header class="bar noprint"><div style="flex:1"><h1 style="margin-bottom:4px">Mock exam administration</h1><span class="muted">Create student accounts and review submissions.</span></div><a class="button secondary" href="/">Open student exam</a><button class="secondary" id="logout">Sign out</button></header>
+    <section class="panel noprint">
+      <h2>Create student accounts</h2>
+      <p class="muted">Enter up to 50 names, one per line. Each account is created once; download or print the credentials before leaving this page. Passwords cannot be viewed again.</p>
+      <form id="rosterForm">
+        <label for="names">Student names</label>
+        <textarea id="names" placeholder="Amina Dlamini&#10;Thabo Mokoena" required></textarea>
+        <p class="error" id="rosterError" role="alert"></p>
+        <button type="submit">Create accounts</button>
+      </form>
+      <div id="credentialsPanel" hidden>
+        <h2>New student credentials</h2>
+        <p class="success">Save or print these now. Passwords will not be shown again.</p>
+        <div class="bar"><button id="downloadCredentials" class="secondary" type="button">Download credentials CSV</button><button id="printCredentials" class="secondary" type="button">Print credentials</button></div>
+        <div class="scroll credentials"><table><thead><tr><th>Name</th><th>Student ID</th><th>Temporary password</th></tr></thead><tbody id="credentials"></tbody></table></div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="bar"><div style="flex:1"><h2 style="margin:0">Student results</h2><span class="muted">Marks and PDFs become available five minutes after submission.</span></div><button id="refresh" class="secondary" type="button">Refresh results</button></div>
+      <p class="error" id="resultsError" role="alert"></p>
+      <div class="scroll"><table><thead><tr><th>Student</th><th>ID</th><th>Submitted</th><th>Result</th><th>PDF</th></tr></thead><tbody id="students"></tbody></table></div>
+    </section>
+  </section>
+</main>
+<script>
+"use strict";
+let credentials = [];
+async function api(path, options = {}) {
+  const response = await fetch(path, { credentials: "same-origin", ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
+  const body = response.headers.get("content-type")?.includes("application/json") ? await response.json() : {};
+  if (!response.ok) throw new Error(body.error || `Request failed (${response.status}).`);
+  return body;
+}
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const date = (seconds) => seconds ? new Date(seconds * 1000).toLocaleString() : "—";
+async function loadStudents() {
+  const body = await api("/api/teacher/students");
+  document.querySelector("#students").innerHTML = body.students.length ? body.students.map((s) => {
+    let result = "Not submitted";
+    if (s.submission_id && !s.released) result = `Pending until ${esc(date(s.release_at))}`;
+    if (s.released) result = `${s.score}/100 (${s.passed}/${s.total})`;
+    const pdf = s.released ? `<a href="/api/teacher/pdf/${encodeURIComponent(s.submission_id)}">Download PDF</a>` : "—";
+    return `<tr><td>${esc(s.name)}</td><td><code>${esc(s.id)}</code></td><td>${esc(date(s.submitted_at))}</td><td>${result}</td><td>${pdf}</td></tr>`;
+  }).join("") : '<tr><td colspan="5">No student accounts yet.</td></tr>';
+}
+async function showTeacher() {
+  document.querySelector("#loginPanel").hidden = true;
+  document.querySelector("#teacherPanel").hidden = false;
+  try { await loadStudents(); document.querySelector("#resultsError").textContent = ""; }
+  catch (error) { document.querySelector("#resultsError").textContent = error.message; }
+}
+async function boot() {
+  try {
+    const me = await api("/api/me");
+    if (me.user?.role === "teacher") return showTeacher();
+  } catch {}
+  document.querySelector("#loginPanel").hidden = false;
+}
+document.querySelector("#loginForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  document.querySelector("#loginError").textContent = "";
+  try {
+    await api("/api/login", { method: "POST", body: JSON.stringify({ role: "teacher", password: document.querySelector("#password").value }) });
+    await showTeacher();
+  } catch (error) { document.querySelector("#loginError").textContent = error.message; }
+});
+document.querySelector("#rosterForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const names = document.querySelector("#names").value.split(/\r?\n/).map((name) => name.trim()).filter(Boolean);
+  document.querySelector("#rosterError").textContent = "";
+  if (!names.length || names.length > 50) {
+    document.querySelector("#rosterError").textContent = "Enter between 1 and 50 names.";
+    return;
+  }
+  try {
+    const result = await api("/api/teacher/students", { method: "POST", body: JSON.stringify({ names }) });
+    credentials = result.students;
+    document.querySelector("#credentials").innerHTML = credentials.map((s) => `<tr><td>${esc(s.name)}</td><td><code>${esc(s.id)}</code></td><td><code>${esc(s.password)}</code></td></tr>`).join("");
+    document.querySelector("#credentialsPanel").hidden = false;
+    document.querySelector("#names").value = "";
+    await loadStudents();
+  } catch (error) { document.querySelector("#rosterError").textContent = error.message; }
+});
+document.querySelector("#downloadCredentials").onclick = () => {
+  const quote = (value) => `"${String(value).replace(/"/g, '""')}"`;
+  const csv = ["Name,Student ID,Temporary password", ...credentials.map((s) => [s.name, s.id, s.password].map(quote).join(","))].join("\r\n");
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  link.download = "eisa-student-credentials.csv";
+  link.click();
+  URL.revokeObjectURL(link.href);
+};
+document.querySelector("#printCredentials").onclick = () => window.print();
+document.querySelector("#refresh").onclick = showTeacher;
+document.querySelector("#logout").onclick = async () => {
+  try { await api("/api/logout", { method: "POST", body: "{}" }); location.reload(); }
+  catch (error) { document.querySelector("#resultsError").textContent = error.message; }
+};
+setInterval(() => { if (!document.querySelector("#teacherPanel").hidden) loadStudents().catch((error) => { document.querySelector("#resultsError").textContent = error.message; }); }, 10000);
+boot();
+</script>
+</body>
+</html>
