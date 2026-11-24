@@ -1,5 +1,8 @@
+import base64
+import binascii
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -16,6 +19,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
+
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT / "data")).resolve()
@@ -25,6 +31,7 @@ PORT = int(os.environ.get("PORT", "8080"))
 SUBMISSION_DELAY = 5 * 60
 SESSION_HOURS = 12
 MAX_BODY = 8 * 1024 * 1024
+MAX_CREDENTIALS_PDF = 4 * 1024 * 1024
 PBKDF2_ROUNDS = 310_000
 login_attempts = defaultdict(deque)
 login_lock = threading.Lock()
@@ -89,6 +96,83 @@ def safe_state(raw):
     if len(json.dumps(raw, ensure_ascii=False)) > MAX_BODY:
         raise ValueError("Progress is too large to save.")
     return raw
+
+
+def parse_credentials_pdf(pdf_bytes):
+    if not pdf_bytes.startswith(b"%PDF-"):
+        raise ValueError("The uploaded file is not a PDF.")
+    reader = PdfReader(io.BytesIO(pdf_bytes), strict=False)
+    if reader.is_encrypted:
+        raise ValueError("Password-protected PDFs are not supported.")
+    pages = reader.pages
+    if not pages or len(pages) > 10:
+        raise ValueError("The credentials PDF must contain between 1 and 10 pages.")
+    records = []
+    seen_ids = set()
+    header_found = False
+    row_pattern = re.compile(r"\s*(.*?)\s+(EISA-[A-F0-9]{6})\s+(\S+)\s*", re.I)
+    for page in pages:
+        text = page.extract_text(extraction_mode="layout") or ""
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            folded = line.casefold()
+            if "student id" in folded and "password" in folded:
+                header_found = True
+                continue
+            match = row_pattern.fullmatch(line)
+            if not match:
+                raise ValueError("The PDF must contain a simple table with student name, ID, and password columns.")
+            name, student_id, password = match.groups()
+            student_id = student_id.upper()
+            name = " ".join(name.split())
+            if not name or len(name) > 100 or not password or len(password) > 256:
+                raise ValueError("A student row has a missing or invalid name or password.")
+            if student_id in seen_ids:
+                raise ValueError("The PDF contains a duplicate student ID.")
+            seen_ids.add(student_id)
+            records.append({"id": student_id, "name": name, "password": password})
+            if len(records) > 50:
+                raise ValueError("The PDF may contain no more than 50 student accounts.")
+    if not header_found or not records:
+        raise ValueError("No student credential table was found in the PDF.")
+    return records
+
+
+def import_student_records(records):
+    if not isinstance(records, list) or not records or len(records) > 50:
+        raise ValueError("Provide between 1 and 50 saved student records.")
+    normalized = []
+    seen_ids = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("Each saved student record must include an ID, name, and password.")
+        student_id = str(record.get("id", "")).strip().upper()
+        name = " ".join(str(record.get("name", "")).split())[:100]
+        password = str(record.get("password", ""))
+        if not re.fullmatch(r"EISA-[A-F0-9]{6}", student_id):
+            raise ValueError("Each saved student ID must use the EISA-XXXXXX format.")
+        if not name or not password or len(password) > 256:
+            raise ValueError("Each saved student record must include a name and a password of up to 256 characters.")
+        if student_id in seen_ids:
+            raise ValueError("The saved records contain a duplicate student ID.")
+        seen_ids.add(student_id)
+        normalized.append((student_id, name, password))
+    created = 0
+    skipped = 0
+    with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        for student_id, name, password in normalized:
+            if student_record(connection, student_id):
+                skipped += 1
+                continue
+            salt = secrets.token_bytes(16)
+            connection.execute(
+                "INSERT INTO students (id, name, salt, password_hash, created_at) VALUES (?, ?, ?, ?, ?)",
+                (student_id, name, salt, password_digest(password, salt), time.time()),
+            )
+            created += 1
+    return {"created": created, "skipped": skipped}
 
 
 def student_record(connection, student_id):
@@ -607,40 +691,27 @@ class Handler(BaseHTTPRequestHandler):
             user = self.require("teacher")
             if not user:
                 return
-            records = data.get("students")
-            if not isinstance(records, list) or not records or len(records) > 50:
-                return self.send_json(400, {"error": "Provide between 1 and 50 saved student records."})
-            normalized = []
-            seen_ids = set()
-            for record in records:
-                if not isinstance(record, dict):
-                    return self.send_json(400, {"error": "Each saved student record must include an ID, name, and password."})
-                student_id = str(record.get("id", "")).strip().upper()
-                name = " ".join(str(record.get("name", "")).split())[:100]
-                password = str(record.get("password", ""))
-                if not re.fullmatch(r"EISA-[A-F0-9]{6}", student_id):
-                    return self.send_json(400, {"error": "Each saved student ID must use the EISA-XXXXXX format."})
-                if not name or not password or len(password) > 256:
-                    return self.send_json(400, {"error": "Each saved student record must include a name and a password of up to 256 characters."})
-                if student_id in seen_ids:
-                    return self.send_json(400, {"error": "The saved records contain a duplicate student ID."})
-                seen_ids.add(student_id)
-                normalized.append((student_id, name, password))
-            created = 0
-            skipped = 0
-            with db() as connection:
-                connection.execute("BEGIN IMMEDIATE")
-                for student_id, name, password in normalized:
-                    if student_record(connection, student_id):
-                        skipped += 1
-                        continue
-                    salt = secrets.token_bytes(16)
-                    connection.execute(
-                        "INSERT INTO students (id, name, salt, password_hash, created_at) VALUES (?, ?, ?, ?, ?)",
-                        (student_id, name, salt, password_digest(password, salt), time.time()),
-                    )
-                    created += 1
-            return self.send_json(201, {"created": created, "skipped": skipped})
+            try:
+                result = import_student_records(data.get("students"))
+            except ValueError as error:
+                return self.send_json(400, {"error": str(error)})
+            return self.send_json(201, result)
+        if path == "/api/teacher/students/import-pdf":
+            user = self.require("teacher")
+            if not user:
+                return
+            encoded_pdf = data.get("pdf")
+            if not isinstance(encoded_pdf, str):
+                return self.send_json(400, {"error": "Upload a PDF containing the saved student credentials."})
+            try:
+                pdf_bytes = base64.b64decode(encoded_pdf, validate=True)
+                if len(pdf_bytes) > MAX_CREDENTIALS_PDF:
+                    return self.send_json(400, {"error": "The PDF must be no larger than 4 MB."})
+                records = parse_credentials_pdf(pdf_bytes)
+                result = import_student_records(records)
+            except (binascii.Error, ValueError, PdfReadError) as error:
+                return self.send_json(400, {"error": str(error) or "The uploaded PDF could not be read."})
+            return self.send_json(201, result)
         self.send_json(404, {"error": "API endpoint not found."})
 
     def login(self, data):

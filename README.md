@@ -1,6 +1,6 @@
 # EISA Mock Exam
 
-The app serves the simulated cloud practical, stores each student's progress in SQLite, and creates a downloadable PDF when the student's result is released. It uses Python's standard library.
+The app serves the simulated cloud practical, stores each student's progress in SQLite, and creates a downloadable PDF when the student's result is released. It uses Python's standard library, with `pypdf` for restoring student accounts from credentials PDFs.
 
 ## Run locally
 
@@ -23,7 +23,7 @@ Local data and generated PDFs are stored in the `data` folder. Keep this folder 
 
 The SQLite database and result PDFs are stored on the volume, so they persist across deploys. Do not remove the volume or run multiple service replicas against this SQLite database. Back up the volume; it contains student names, work, marks, and evidence.
 
-To restore saved accounts, sign in as the teacher and use **Restore saved student credentials** with a JSON array of `{ "id": "EISA-XXXXXX", "name": "...", "password": "..." }` records. Existing IDs are skipped without changing their names or passwords.
+To restore saved accounts, sign in as the teacher and use **Restore saved student credentials** to upload the saved credentials PDF (simple name, student ID, and temporary password columns; up to 50 accounts and 4 MB) or a JSON array of `{ "id": "EISA-XXXXXX", "name": "...", "password": "..." }` records. Existing IDs are skipped without changing their names or passwords.
 
 ## Exam workflow
 

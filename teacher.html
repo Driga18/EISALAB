@@ -49,10 +49,10 @@ code{font-size:13px}.credentials{max-height:380px;overflow:auto}@media print{.no
     </section>
     <section class="panel noprint">
       <h2>Restore saved student credentials</h2>
-      <p class="muted">Import a JSON backup containing up to 50 records with <code>id</code>, <code>name</code>, and <code>password</code> fields. Existing student IDs are skipped and never changed.</p>
+      <p class="muted">Upload the saved credentials PDF or a JSON backup (up to 50 accounts; PDF size limit 4 MB). Existing IDs are skipped and never changed.</p>
       <form id="restoreForm">
-        <label for="restoreFile">Credentials backup</label>
-        <input id="restoreFile" type="file" accept=".json,application/json" required>
+        <label for="restoreFile">Credentials PDF or JSON backup</label>
+        <input id="restoreFile" type="file" accept=".pdf,application/pdf,.json,application/json" required>
         <p class="error" id="restoreError" role="alert"></p>
         <p class="success" id="restoreStatus" role="status"></p>
         <button type="submit">Restore missing accounts</button>
@@ -137,16 +137,31 @@ document.querySelector("#restoreForm").addEventListener("submit", async (event) 
   errorElement.textContent = "";
   statusElement.textContent = "";
   if (!file) {
-    errorElement.textContent = "Choose a JSON credentials backup.";
+    errorElement.textContent = "Choose a credentials PDF or JSON backup.";
     return;
   }
   try {
-    const records = JSON.parse(await file.text());
-    if (!Array.isArray(records)) throw new Error("The backup must contain a JSON array of student records.");
-    const result = await api("/api/teacher/students/import", {
-      method: "POST",
-      body: JSON.stringify({ students: records })
-    });
+    const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+    let result;
+    if (isPdf) {
+      if (file.size > 4 * 1024 * 1024) throw new Error("The PDF must be no larger than 4 MB.");
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = "";
+      for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+      }
+      result = await api("/api/teacher/students/import-pdf", {
+        method: "POST",
+        body: JSON.stringify({ pdf: btoa(binary) })
+      });
+    } else {
+      const records = JSON.parse(await file.text());
+      if (!Array.isArray(records)) throw new Error("The backup must contain a JSON array of student records.");
+      result = await api("/api/teacher/students/import", {
+        method: "POST",
+        body: JSON.stringify({ students: records })
+      });
+    }
     statusElement.textContent = `Restored ${result.created} account(s). ${result.skipped} existing ID(s) were left unchanged.`;
     document.querySelector("#restoreFile").value = "";
     await loadStudents();
