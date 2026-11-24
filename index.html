@@ -166,6 +166,7 @@ textarea{font-family:var(--mono);font-size:13px}
 .ev .it pre{margin:0;padding:10px 12px;font-family:var(--mono);font-size:12px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:var(--term-bg);color:var(--term-ink);border-radius:0 0 6px 6px}
 .muted{color:var(--ink-3)}
 .mono{font-family:var(--mono)}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 @media (max-width:900px){
   .mid{grid-template-columns:1fr}
   .rail{display:flex;overflow-x:auto;padding:0}
@@ -908,6 +909,80 @@ function trafficLogPartitions(vm) {
   return (vm?.dataDisks || []).filter((disk) => disk.size === 8)
     .map((disk) => devOfLun(vm, disk.lun) + "1");
 }
+function linuxDiskPartitions(vm, disk) {
+  const dev = devOfLun(vm, disk.lun);
+  return Object.keys(vm.linux?.parts || {}).filter((name) => name.startsWith(dev) && /^\d+$/.test(name.slice(dev.length)));
+}
+function createDiskPartition(vm, disk) {
+  const L = vm.linux; const dev = devOfLun(vm, disk.lun); const partition = dev + "1";
+  if (Object.values(L.mounts).some((mounted) => mounted === partition)) return "Unmount the partition before changing its layout.";
+  if (linuxDiskPartitions(vm, disk).length) return "This disk already has a partition. Existing data was left unchanged.";
+  const size = (L.seen[dev] ?? disk.size) * GiB;
+  L.parts[dev + "_label"] = { label: true };
+  L.parts[partition] = { fs: null, uuid: null, psize: size - 2 * MiB, size: 0, base: 0 };
+  act("Linux: create GPT partition", `${vm.name} /dev/${partition}`);
+  save(); renderDrawer(); renderBlade();
+  toast(`Created /dev/${partition}. Format it as ext4 to continue.`);
+}
+function formatDiskPartition(vm, partition) {
+  const L = vm.linux; const part = L.parts[partition];
+  if (!part || part.fs) { toast("Only a new, unformatted partition can be formatted here."); return; }
+  if (Object.values(L.mounts).includes(partition)) { toast("Unmount this partition before formatting it."); return; }
+  part.fs = "ext4"; part.uuid = uuid(); part.size = part.psize * 0.975; part.base = 24 * 1024;
+  act("Linux: format ext4", `${vm.name} /dev/${partition}`);
+  save(); renderDrawer(); renderBlade();
+  toast(`Formatted /dev/${partition} as ext4.`);
+}
+function persistDiskMount(vm, partition, mountpoint) {
+  const L = vm.linux; const part = L.parts[partition];
+  const target = mountpoint.trim();
+  const protectedTarget = /^\/(boot|dev|etc|lib|lib64|proc|root|run|sbin|sys|usr)(\/|$)/;
+  if (!/^\/(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/.test(target) ||
+      target.split("/").some((segment) => segment === "." || segment === "..") ||
+      target === "/mnt" || protectedTarget.test(target)) {
+    toast("Enter a safe absolute mount path, such as /var/traffic_logs or /data.");
+    return;
+  }
+  if (!part?.uuid || part.fs !== "ext4") { toast("Format the partition as ext4 first."); return; }
+  const currentMount = Object.entries(L.mounts).find(([, mounted]) => mounted === partition);
+  if (currentMount && currentMount[0] !== target) { toast(`Unmount /dev/${partition} from ${currentMount[0]} before moving it.`); return; }
+  if (L.mounts[target] && L.mounts[target] !== partition) { toast("Another partition is already mounted at this path."); return; }
+  if (Object.keys(L.mounts).some((path) => path !== "/" && (path.startsWith(target + "/") || target.startsWith(path + "/")))) {
+    toast("Choose a mount path that does not overlap another mounted filesystem.");
+    return;
+  }
+  const existing = (L.fs["/etc/fstab"]?.c || "").split("\n").map((line) => line.trim().split(/\s+/));
+  if (existing.some((fields) => fields.length >= 4 && !fields[0].startsWith("#") && fields[1] === target && fields[0] !== `UUID=${part.uuid}`)) {
+    toast("This mount path is already assigned to another disk in /etc/fstab.");
+    return;
+  }
+  if (existing.some((fields) => fields.length >= 4 && !fields[0].startsWith("#") && fields[0] === `UUID=${part.uuid}` && fields[1] !== target)) {
+    toast("This partition already has a different mount path in /etc/fstab.");
+    return;
+  }
+  const fstab = L.fs["/etc/fstab"];
+  if (!fstab) { toast("/etc/fstab is unavailable on this VM."); return; }
+  const segments = target.split("/").filter(Boolean); let current = "";
+  for (const segment of segments) {
+    current += "/" + segment;
+    if (L.fs[current] && L.fs[current].t !== "d") { toast(`${current} exists and is not a directory.`); return; }
+  }
+  current = "";
+  for (const segment of segments) {
+    current += "/" + segment;
+    if (!L.fs[current]) L.fs[current] = { t: "d", mode: 0o755, o: "root", g: "root", m: now() };
+  }
+  const entry = `UUID=${part.uuid} ${target} ext4 defaults,nofail 0 2`;
+  if (!existing.some((fields) => fields[0] === `UUID=${part.uuid}` && fields[1] === target && fields[2] === "ext4")) {
+    fstab.c = (fstab.c || "").replace(/\s*$/, "") + `\n${entry}\n`;
+    fstab.size = fstab.c.length;
+  }
+  L.mounts[target] = partition;
+  flag("fstabEdited"); flag("rebootMountOK", false);
+  act("Linux: mount ext4 partition persistently", `${vm.name} /dev/${partition} at ${target}`);
+  save(); renderDrawer(); renderBlade();
+  toast(`Mounted /dev/${partition} at ${target}; UUID entry saved to /etc/fstab.`);
+}
 function afterUfwChange(vm) {
   // existing SSH sessions drop if ufw blocks 22
   if (vm.linux.ufw.enabled && ufwDecision(vm, 22) !== "allow") {
@@ -1254,7 +1329,23 @@ function pageUsers() {
 function vmTable() { return `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Status</th><th>Size</th><th>Public IP</th><th>Private IP</th></tr></thead><tbody>${S.vms.map((v) => `<tr><td><button class="link" type="button" data-vm="${v.id}">${esc(v.name)}</button></td><td>${esc(v.rg)}</td><td>${statusPill(v.status)}</td><td>${esc(v.size)}</td><td class="mono">${esc(v.pip || "–")}</td><td class="mono">${esc(v.privateIp)}</td></tr>`).join("")}</tbody></table></div>`; }
 function pageVms() { return `<div class="crumb"><a data-go="home">Home</a></div><h1>Virtual machines</h1><p class="sub">Subscription: Mock EISA lab · Quota used: ${S.vms.reduce((a, v) => a + sizeOf(v).vcpu, 0)} of ${QUOTA} vCPUs (South Africa North)</p><div class="cmdbar"><button class="btn primary" type="button" data-go="create">+ Create</button></div>${S.vms.length ? vmTable() : `<div class="panel"><b>No virtual machines yet.</b><p class="muted">Create one to start Task 1.1.</p><button class="btn primary" type="button" data-go="create">+ Create a virtual machine</button></div>`}`; }
 function pageVnets() { return `<div class="crumb"><a data-go="home">Home</a></div><h1>Virtual networks</h1><p class="sub">Create networks here or in the VM wizard. A network needs an address space and at least one subnet.</p><div class="cmdbar"><button class="btn primary" type="button" id="createVnet">+ Create</button></div>${S.vnets.length ? `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Address space</th><th>Subnets</th><th>Location</th></tr></thead><tbody>${S.vnets.map((n) => `<tr><td>${esc(n.name)}</td><td>${esc(n.rg)}</td><td class="mono">${esc(n.space)}</td><td>${n.subnets.map((s) => `${esc(s.name)} <span class="mono muted">${esc(s.range)}</span>`).join("<br>")}</td><td>${esc(n.region)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No virtual networks yet. Create one here or during VM deployment.</div>`}`; }
-function pageDisks() { const rows = []; for (const v of S.vms) { rows.push([v.name + "_OsDisk_1", v.rg, v.osDisk, v.osType, "Attached", v.name, "OS"]); for (const d of v.dataDisks) rows.push([d.name, v.rg, d.size, d.sku, "Attached", v.name, "LUN " + d.lun]); } return `<div class="crumb"><a data-go="home">Home</a></div><h1>Disks</h1><p class="sub">Managed disks. Create and attach an exam data disk to a VM, or resize an attached disk from its VM.</p><div class="cmdbar"><button class="btn primary" type="button" id="createDisk">+ Create and attach</button></div>${rows.length ? `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Size</th><th>Type</th><th>State</th><th>Owner VM</th><th>Role</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td>${r[2]} GiB</td><td>${esc(r[3])}</td><td>${statusPill(r[4]).replace("warn", "ok")}</td><td>${esc(r[5])}</td><td>${esc(r[6])}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No disks yet. Create a VM before attaching an exam data disk.</div>`}`; }
+function pageDisks() { const rows = []; for (const v of S.vms) { rows.push([v.name + "_OsDisk_1", v.rg, v.osDisk, v.osType, "Attached", v.name, "OS", v.id, null]); for (const d of v.dataDisks) rows.push([d.name, v.rg, d.size, d.sku, "Attached", v.name, "LUN " + d.lun, v.id, d.lun]); } return `<div class="crumb"><a data-go="home">Home</a></div><h1>Disks</h1><p class="sub">Managed disks. Create and attach an exam data disk to a VM, or resize an attached disk from its VM.</p><div class="cmdbar"><button class="btn primary" type="button" id="createDisk">+ Create and attach</button></div>${rows.length ? `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Size</th><th>Type</th><th>State</th><th>Owner VM</th><th>Role</th><th>Linux partitions</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td>${r[2]} GiB</td><td>${esc(r[3])}</td><td>${statusPill(r[4]).replace("warn", "ok")}</td><td>${esc(r[5])}</td><td>${esc(r[6])}</td><td>${r[8] === null ? "—" : `<button class="link" type="button" data-linux-disk-vm="${esc(r[7])}">Manage in Linux</button>`}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No disks yet. Create a VM before attaching an exam data disk.</div>`}`; }
+function pageLinuxDiskManager(vm) {
+  if (!vm.linux) vm.linux = newLinux(vm);
+  const disks = vm.dataDisks.slice().sort((a, b) => a.lun - b.lun);
+  return `<div class="crumb"><a data-go="disks">Disks</a> › <a data-vm-overview="${esc(vm.id)}">${esc(vm.name)}</a></div><h1>Linux Disk Manager</h1><p class="sub">Graphically partition and mount attached data disks. Changes are simulated and use the same state as the Linux terminal.</p>
+    <div class="note warn">Formatting erases data on the selected partition. The OS disk and temporary disk are not available here. Verify the disk name, LUN, and size before formatting.</div>
+    ${disks.length ? disks.map((disk) => {
+      const dev = devOfLun(vm, disk.lun); const partitions = linuxDiskPartitions(vm, disk);
+      return `<section class="panel" style="margin-top:14px"><h2 style="margin-top:0">${esc(disk.name)}</h2><dl class="kv"><dt>Linux device</dt><dd class="mono">/dev/${dev}</dd><dt>Size / LUN</dt><dd>${disk.size} GiB · LUN ${disk.lun}</dd><dt>Partition table</dt><dd>${vm.linux.parts[dev + "_label"] ? "GPT" : "Not initialized"}</dd></dl>
+        ${partitions.length ? `<div class="tw" style="margin-top:12px"><table class="t"><thead><tr><th>Partition</th><th>File system</th><th>UUID</th><th>Mounted at</th><th>Actions</th></tr></thead><tbody>${partitions.map((partition) => {
+          const part = vm.linux.parts[partition]; const mount = Object.entries(vm.linux.mounts).find(([, name]) => name === partition)?.[0];
+          return `<tr><td class="mono">/dev/${partition}</td><td>${esc(part.fs || "Unformatted")}</td><td class="mono">${esc(part.uuid || "—")}</td><td class="mono">${esc(mount || "Not mounted")}${mount && hasPersistentFstabMount(vm, mount, partition) ? " · persistent" : ""}</td><td>${!part.fs ? `<button class="btn primary" type="button" data-format-part="${esc(partition)}" ${vm.status !== "Running" ? "disabled" : ""}>Format ext4</button>` : mount ? "Mounted" : `<label class="sr-only" for="disk-mount-${disk.lun}">Mount point for /dev/${esc(partition)}</label><input id="disk-mount-${disk.lun}" type="text" value="${disk.size === 8 ? "/var/traffic_logs" : ""}" placeholder="/data" style="max-width:180px" ${vm.status !== "Running" ? "disabled" : ""}><button class="btn primary" type="button" data-persist-mount="${esc(partition)}" data-lun="${disk.lun}" ${vm.status !== "Running" ? "disabled" : ""}>Mount + save permanently</button>`}</td></tr>`;
+        }).join("")}</tbody></table></div>` : `<p class="muted">No partitions detected on this disk.</p><button class="btn primary" type="button" data-create-part="${disk.lun}" ${vm.status !== "Running" ? "disabled" : ""}>Create GPT partition</button>`}
+      </section>`;
+    }).join("") : `<div class="panel muted">No data disks are attached to this VM. Attach a disk from the Disks tab first.</div>`}
+    <div class="note" style="margin-top:14px">To verify persistence, restart the VM and return here. A mount marked “persistent” is backed by a UUID entry in <span class="mono">/etc/fstab</span>.</div>`;
+}
 function pageActivity() { return `<div class="crumb"><a data-go="home">Home</a></div><h1>Activity log</h1><p class="sub">Every change made in this lab, newest first.</p>${S.activity.length ? `<div class="tw"><table class="t"><thead><tr><th>Time (SAST)</th><th>Operation</th><th>Resource</th><th>Status</th><th>Initiated by</th></tr></thead><tbody>${S.activity.slice(0, 120).map((a) => `<tr><td class="mono">${esc(sast(a.t))}</td><td>${esc(a.op)}</td><td>${esc(a.target)}</td><td>${statusPill(a.status).replace("warn", "ok")}</td><td>${esc(a.by)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">Nothing has happened yet.</div>`}`; }
 
 /* ---- create VM wizard ---- */
@@ -1565,7 +1656,12 @@ function createLinuxUserModal() {
   });
 }
 function bindVnets() { $("#createVnet").onclick = () => vnetModal(false); }
-function bindDisks() { $("#createDisk").onclick = chooseVmForDisk; }
+function bindDisks() {
+  $("#createDisk").onclick = chooseVmForDisk;
+  $("#blade").querySelectorAll("[data-linux-disk-vm]").forEach((button) => {
+    button.onclick = () => go("vm", button.dataset.linuxDiskVm, "diskManager");
+  });
+}
 function createResourceGroupModal() {
   modal(`<h2 style="margin:0">Create resource group</h2><div class="form"><div class="field"><label for="rg_name">Resource group name *</label><input id="rg_name" type="text" value="rg-new-exam"></div><div class="field"><label for="rg_region">Region</label><select id="rg_region">${REGIONS.map((r, i) => `<option ${i === 0 ? "selected" : ""}>${esc(r)}</option>`).join("")}</select></div><div class="err" id="rg_err"></div></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="rg_cancel">Cancel</button><button class="btn primary" type="button" id="rg_create">Create</button></div>`, () => {
     $("#rg_cancel").onclick = closeModal;
@@ -1603,7 +1699,7 @@ function deployVm() {
 
 /* ---- VM page ---- */
 function pageVm(vm) {
-  const tabs = [["overview", "Overview"], ["g", "Settings"], ["networking", "Networking"], ["disks", "Disks"], ["size", "Size"], ["connect", "Connect"], ["g", "Operations"], ["runcmd", "Run command"], ["updates", "Updates"], ["autoshut", "Auto-shutdown"], ["g", "Monitoring"], ["metrics", "Metrics"], ["g", "Help"], ["reset", "Reset password"]];
+  const tabs = [["overview", "Overview"], ["g", "Settings"], ["networking", "Networking"], ["disks", "Disks"], ["diskManager", "Linux Disk Manager"], ["size", "Size"], ["connect", "Connect"], ["g", "Operations"], ["runcmd", "Run command"], ["updates", "Updates"], ["autoshut", "Auto-shutdown"], ["g", "Monitoring"], ["metrics", "Metrics"], ["g", "Help"], ["reset", "Reset password"]];
   const t = S.vmTab;
   let body = "";
   if (t === "overview") { const sz = sizeOf(vm); body = `<div class="cmdbar"><button class="btn" type="button" data-act="connect">Connect</button><button class="btn" type="button" data-act="start" ${vm.status === "Running" ? "disabled" : ""}>Start</button><button class="btn" type="button" data-act="restart" ${vm.status !== "Running" ? "disabled" : ""}>Restart</button><button class="btn" type="button" data-act="stop" ${vm.status !== "Running" ? "disabled" : ""}>Stop</button><button class="btn" type="button" data-act="capture">Capture this page</button><button class="btn danger" type="button" data-act="delete">Delete</button></div>
@@ -1615,6 +1711,7 @@ function pageVm(vm) {
   if (t === "disks") { body = `<div class="cmdbar"><button class="btn primary" type="button" data-act="adddisk">+ Create and attach a new disk</button><button class="btn" type="button" data-act="capture">Capture this page</button></div>
     <h3>OS disk</h3><div class="tw"><table class="t"><thead><tr><th>Disk name</th><th>Storage type</th><th>Size (GiB)</th><th>Encryption</th></tr></thead><tbody><tr><td>${esc(vm.name)}_OsDisk_1</td><td>${esc(vm.osType)} LRS</td><td>${vm.osDisk}</td><td>SSE with PMK</td></tr></tbody></table></div>
     <h3>Data disks</h3>${vm.dataDisks.length ? `<div class="tw"><table class="t"><thead><tr><th>LUN</th><th>Disk name</th><th>Storage type</th><th>Size (GiB)</th><th>Host caching</th><th></th></tr></thead><tbody>${vm.dataDisks.slice().sort((a, b) => a.lun - b.lun).map((d) => `<tr><td>${d.lun}</td><td><button class="link" type="button" data-diskres="${d.lun}">${esc(d.name)}</button></td><td>${esc(d.sku)}</td><td>${d.size}</td><td>Read-only</td><td><button class="link" type="button" data-detach="${d.lun}">Detach</button></td></tr>`).join("")}</tbody></table></div><p class="muted">Click a disk name to change its size.</p>` : `<div class="panel muted">No data disks attached.</div>`}`; }
+  if (t === "diskManager") body = pageLinuxDiskManager(vm);
   if (t === "size") { const sz = sizeOf(vm); body = `<p>Current size: <b>${esc(vm.size)}</b> – ${sz.vcpu} vCPU, ${sz.mem} GiB memory, ${sz.temp} GiB temporary storage.</p><div class="note">Resizing is not needed for the mock exam. If you chose the wrong size, delete the VM and create it again with Standard_B1ms (1 vCPU, 2 GiB).</div>`; }
   if (t === "connect") { body = `<div class="panel"><h3 style="margin-top:0">Native SSH</h3><p>Open the laptop terminal below and run:</p><div class="hintbox">ssh ${esc(vm.admin)}@${esc(vm.pip || "<no public IP>")}</div><p class="muted">Use the password you set when you created the VM. Port 22 must be allowed in the network rules.</p><button class="btn primary" type="button" data-act="openterm">Open laptop terminal</button></div>`; }
   if (t === "runcmd") { body = `<p class="sub">Runs a shell script inside the VM as root through the VM agent – no SSH needed. Use it to recover if you lock yourself out.</p><div class="form" style="max-width:none"><label for="rc_script"><b>RunShellScript</b></label><textarea id="rc_script" rows="6" placeholder="e.g. ufw allow 22/tcp">${esc(S.rcLast || "")}</textarea><div><button class="btn primary" type="button" data-act="runcmd" ${vm.status !== "Running" ? "disabled" : ""}>Run</button></div><div><b>Output</b><pre class="hintbox" id="rc_out" style="min-height:80px">${esc(S.rcOut || "")}</pre></div></div>`; }
@@ -1631,6 +1728,23 @@ function bindVm(vm) {
   b.querySelectorAll("[data-delrule]").forEach((x) => (x.onclick = () => { vm.nsg = vm.nsg.filter((r) => r.name !== x.dataset.delrule); act("Delete security rule " + x.dataset.delrule, vm.name + "-nsg"); save(); renderBlade(); }));
   b.querySelectorAll("[data-detach]").forEach((x) => (x.onclick = () => { const lun = +x.dataset.detach; const dev = devOfLun(vm, lun); if (vm.linux && Object.values(vm.linux.mounts).some((p) => p.startsWith(dev))) { toast("Unmount the disk inside the VM first (sudo umount …)."); return; } vm.dataDisks = vm.dataDisks.filter((d) => d.lun !== lun); if (vm.linux) { for (const k of Object.keys(vm.linux.parts)) if (k.startsWith(dev)) delete vm.linux.parts[k]; delete vm.linux.seen[dev]; } act("Detach data disk LUN " + lun, vm.name); save(); renderBlade(); }));
   b.querySelectorAll("[data-diskres]").forEach((x) => (x.onclick = () => diskResizeModal(vm, +x.dataset.diskres)));
+  b.querySelectorAll("[data-create-part]").forEach((button) => (button.onclick = () => {
+    const disk = vm.dataDisks.find((item) => item.lun === +button.dataset.createPart);
+    if (disk) createDiskPartition(vm, disk);
+  }));
+  b.querySelectorAll("[data-format-part]").forEach((button) => (button.onclick = () => {
+    const partition = button.dataset.formatPart;
+    modal(`<h2 style="margin-top:0">Format /dev/${esc(partition)}?</h2><p class="note warn">Formatting erases all data on this partition. This action cannot be undone.</p><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="format_cancel">Cancel</button><button class="btn danger" type="button" id="format_confirm">Format ext4</button></div>`, () => {
+      $("#format_cancel").onclick = closeModal;
+      $("#format_confirm").onclick = () => { closeModal(); formatDiskPartition(vm, partition); };
+    });
+  }));
+  b.querySelectorAll("[data-persist-mount]").forEach((button) => (button.onclick = () => {
+    const partition = button.dataset.persistMount;
+    const input = $(`#disk-mount-${button.dataset.lun}`);
+    persistDiskMount(vm, partition, input?.value || "");
+  }));
+  b.querySelectorAll("[data-vm-overview]").forEach((button) => (button.onclick = () => go("vm", button.dataset.vmOverview, "overview")));
   b.querySelectorAll("[data-act]").forEach((x) => (x.onclick = () => vmAction(vm, x.dataset.act)));
   b.querySelectorAll('input[name="as_on"]').forEach((x) => (x.onchange = () => {}));
   if (S.vmTab === "metrics") bindMetrics(vm);
