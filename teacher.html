@@ -61,12 +61,13 @@ code{font-size:13px}.credentials{max-height:380px;overflow:auto}@media print{.no
     <section class="panel">
       <div class="bar"><div style="flex:1"><h2 style="margin:0">Student results</h2><span class="muted">Marks and PDFs become available five minutes after submission.</span></div><button id="refresh" class="secondary" type="button">Refresh results</button></div>
       <p class="error" id="resultsError" role="alert"></p>
-      <div class="scroll"><table><thead><tr><th>Student</th><th>ID</th><th>Submitted</th><th>Result</th><th>PDF</th></tr></thead><tbody id="students"></tbody></table></div>
+      <div class="scroll"><table><thead><tr><th>Student</th><th>ID</th><th>Attempt</th><th>Submitted</th><th>Result</th><th>PDF</th></tr></thead><tbody id="students"></tbody></table></div>
     </section>
   </section>
 </main>
 <script>
 "use strict";
+const MAX_EXAM_ATTEMPTS = 5;
 let credentials = [];
 async function api(path, options = {}) {
   const response = await fetch(path, { credentials: "same-origin", ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
@@ -79,12 +80,13 @@ const date = (seconds) => seconds ? new Date(seconds * 1000).toLocaleString() : 
 async function loadStudents() {
   const body = await api("/api/teacher/students");
   document.querySelector("#students").innerHTML = body.students.length ? body.students.map((s) => {
+    const attempt = s.attempt_number ? `${s.attempt_number}/${MAX_EXAM_ATTEMPTS}` : "Not started";
     let result = "Not submitted";
     if (s.submission_id && !s.released) result = `Pending until ${esc(date(s.release_at))}`;
     if (s.released) result = `${s.score}/100 (${s.passed}/${s.total})`;
     const pdf = s.released ? `<a href="/api/teacher/pdf/${encodeURIComponent(s.submission_id)}">Download PDF</a>` : "—";
-    return `<tr><td>${esc(s.name)}</td><td><code>${esc(s.id)}</code></td><td>${esc(date(s.submitted_at))}</td><td>${result}</td><td>${pdf}</td></tr>`;
-  }).join("") : '<tr><td colspan="5">No student accounts yet.</td></tr>';
+    return `<tr><td>${esc(s.name)}</td><td><code>${esc(s.id)}</code></td><td>${attempt}</td><td>${esc(date(s.submitted_at))}</td><td>${result}</td><td>${pdf}</td></tr>`;
+  }).join("") : '<tr><td colspan="6">No student accounts yet.</td></tr>';
 }
 async function showTeacher() {
   document.querySelector("#loginPanel").hidden = true;

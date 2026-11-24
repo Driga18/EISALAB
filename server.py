@@ -29,6 +29,7 @@ DB_PATH = DATA_DIR / "eisa.sqlite3"
 REPORT_DIR = DATA_DIR / "reports"
 PORT = int(os.environ.get("PORT", "8080"))
 SUBMISSION_DELAY = 5 * 60
+MAX_EXAM_ATTEMPTS = 5
 SESSION_HOURS = 12
 MAX_BODY = 8 * 1024 * 1024
 MAX_CREDENTIALS_PDF = 4 * 1024 * 1024
@@ -68,13 +69,13 @@ with db() as connection:
         );
         CREATE TABLE IF NOT EXISTS progress (
             student_id TEXT PRIMARY KEY REFERENCES students(id),
-            state_json TEXT NOT NULL, updated_at REAL NOT NULL
+            state_json TEXT NOT NULL, updated_at REAL NOT NULL, attempt_number INTEGER NOT NULL DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS submissions (
             id TEXT PRIMARY KEY, student_id TEXT NOT NULL REFERENCES students(id),
             submitted_at REAL NOT NULL, release_at REAL NOT NULL, state_json TEXT NOT NULL,
             passed INTEGER NOT NULL, total INTEGER NOT NULL, score INTEGER NOT NULL,
-            released INTEGER NOT NULL DEFAULT 0, pdf_path TEXT
+            released INTEGER NOT NULL DEFAULT 0, pdf_path TEXT, attempt_number INTEGER NOT NULL DEFAULT 1
         );
         CREATE INDEX IF NOT EXISTS submissions_student ON submissions(student_id, submitted_at DESC);
         CREATE TABLE IF NOT EXISTS sessions (
@@ -84,6 +85,12 @@ with db() as connection:
         CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
         """
     )
+    for table in ("progress", "submissions"):
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        if "attempt_number" not in columns:
+            connection.execute(
+                f"ALTER TABLE {table} ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 1"
+            )
 
 
 def password_digest(password, salt):
@@ -187,6 +194,33 @@ def latest_submission(connection, student_id):
         "SELECT * FROM submissions WHERE student_id = ? ORDER BY submitted_at DESC LIMIT 1",
         (student_id,),
     ).fetchone()
+
+
+def submission_count(connection, student_id):
+    return connection.execute(
+        "SELECT COUNT(*) FROM submissions WHERE student_id = ?",
+        (student_id,),
+    ).fetchone()[0]
+
+
+THEORY_QUESTION_IDS = {
+    "1.1", "1.2", "1.3", "1.4",
+    "2.1", "2.2", "2.3", "2.4", "2.5",
+    "3.1", "3.2", "3.3", "3.4",
+}
+
+
+def validated_theory_answers(raw):
+    if not isinstance(raw, dict):
+        raise ValueError("Theory answers must be provided as an object.")
+    if any(key not in THEORY_QUESTION_IDS for key in raw):
+        raise ValueError("The theory answers contain an unknown question ID.")
+    answers = {}
+    for question_id, answer in raw.items():
+        if not isinstance(answer, str) or len(answer) > 12000:
+            raise ValueError("Each theory answer must be text no longer than 12,000 characters.")
+        answers[question_id] = answer
+    return answers
 
 
 def get_vm(state):
@@ -298,21 +332,18 @@ def pdf_escape(text):
     return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def build_pdf(student_name, student_id, submitted_at, score, passed, checks, state):
+def build_pdf(student_name, student_id, submitted_at, score, passed, checks, state, attempt_number):
     started_at = state.get("startedAt")
     duration = max(0, int(submitted_at - started_at / 1000)) if isinstance(started_at, (int, float)) else 0
     lines = [
-        "EISA Cloud Lab - Mock practical submission",
+        "EISA Cloud Lab - Mock exam result",
         f"Student: {student_name} ({student_id})",
+        f"Attempt: {attempt_number}/{MAX_EXAM_ATTEMPTS}",
         f"Submitted: {datetime.fromtimestamp(submitted_at, timezone.utc).astimezone().strftime('%Y-%m-%d %H:%M:%S %Z')}",
         f"Time used: {duration // 3600:02d}:{duration // 60 % 60:02d}:{duration % 60:02d}",
-        f"Final mark: {score}/100   Checks passed: {passed}/{len(checks)}",
-        "",
-        "AUTOMATIC CHECKS",
+        f"Final mark: {score}/100   Practical checks passed: {passed}/{len(checks)}",
+        "", "SECTION A - THEORY RESPONSES",
     ]
-    for label, result in zip(CHECK_LABELS, checks):
-        lines.append(f"[{'PASS' if result else 'NOT PASSED'}] {label}")
-    lines.extend(["", "SECTION A - THEORY RESPONSES"])
     theory_answers = state.get("theoryAnswers") or {}
     if not isinstance(theory_answers, dict):
         theory_answers = {}
@@ -326,6 +357,8 @@ def build_pdf(student_name, student_id, submitted_at, score, passed, checks, sta
         lines.extend(str(answer).splitlines() if isinstance(answer, str) and answer.strip() else ["No response."])
     research = state.get("research") or {}
     lines.extend([
+        "",
+        "SECTION B - PRACTICAL RESULTS",
         "",
         "RESEARCH RESPONSE",
         f"Vulnerability: {research.get('name', '')}",
@@ -347,7 +380,11 @@ def build_pdf(student_name, student_id, submitted_at, score, passed, checks, sta
         "AUTOMATED SIMULATOR RESULT",
         "This mark is calculated from the simulator's automatic checks. It is not a",
         "manual assessment of Section A theory answers, research quality, or real cloud work.",
+        "",
+        "PRACTICAL CHECKS",
     ])
+    for label, result in zip(CHECK_LABELS, checks):
+        lines.append(f"[{'PASS' if result else 'NOT PASSED'}] {label}")
     wrapped = []
     for line in lines:
         chunks = [line[i:i + 105] for i in range(0, max(1, len(line)), 105)]
@@ -394,15 +431,22 @@ def release_due(connection, submission):
     score = int(passed * 100 / len(checks) + 0.5)
     student = student_record(connection, submission["student_id"])
     path = REPORT_DIR / f"{submission['id']}.pdf"
-    pdf = build_pdf(student["name"], student["id"], submission["submitted_at"], score, passed, checks, state)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_bytes(pdf)
-    os.replace(temporary, path)
+    write_submission_pdf(path, student, submission, score, passed, checks, state)
     connection.execute(
         "UPDATE submissions SET passed = ?, total = ?, score = ?, released = 1, pdf_path = ? WHERE id = ?",
         (passed, len(checks), score, str(path), submission["id"]),
     )
     return connection.execute("SELECT * FROM submissions WHERE id = ?", (submission["id"],)).fetchone()
+
+
+def write_submission_pdf(path, student, submission, score, passed, checks, state):
+    pdf = build_pdf(
+        student["name"], student["id"], submission["submitted_at"],
+        score, passed, checks, state, submission["attempt_number"],
+    )
+    temporary = path.with_suffix(".tmp")
+    temporary.write_bytes(pdf)
+    os.replace(temporary, path)
 
 
 def release_worker():
@@ -532,12 +576,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, {"user": {"role": "teacher", "name": "Teacher"}})
             with db() as connection:
                 student = student_record(connection, user["user_id"])
-                submission = latest_submission(connection, student["id"])
+                used = submission_count(connection, student["id"])
+                progress = connection.execute(
+                    "SELECT attempt_number FROM progress WHERE student_id = ?",
+                    (student["id"],),
+                ).fetchone()
+                active_attempt = bool(
+                    used < MAX_EXAM_ATTEMPTS
+                    and progress
+                    and progress["attempt_number"] == used + 1
+                )
+                submission = None if active_attempt else latest_submission(connection, student["id"])
                 if submission:
                     submission = release_due(connection, submission)
                 return self.send_json(200, {
                     "user": {"role": "student", "id": student["id"], "name": student["name"]},
-                    "submission": self.submission_json(submission) if submission else None,
+                    "submission": self.submission_json(submission, used) if submission else None,
+                    "attemptsUsed": used,
+                    "attemptsRemaining": MAX_EXAM_ATTEMPTS - used,
+                    "activeAttemptNumber": used + 1 if active_attempt else None,
                 })
         if path == "/api/state":
             user = self.require("student")
@@ -555,7 +612,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not submission:
                     return self.send_json(404, {"error": "No submission found."})
                 submission = release_due(connection, submission)
-                return self.send_json(200, self.submission_json(submission))
+                used = submission_count(connection, user["user_id"])
+                return self.send_json(200, self.submission_json(submission, used))
         if path == "/api/my-pdf":
             user = self.require("student")
             if not user:
@@ -567,7 +625,8 @@ class Handler(BaseHTTPRequestHandler):
                 submission = release_due(connection, submission)
                 if not submission["released"]:
                     return self.send_json(403, {"error": "Your PDF will be available when your mark is released."})
-                return self.send_pdf(submission["pdf_path"], f"{user['user_id']}-mock-exam-result.pdf", query.get("inline") == ["1"])
+                filename = f"{user['user_id']}-attempt-{submission['attempt_number']}-mock-exam-result.pdf"
+                return self.send_pdf(submission["pdf_path"], filename, query.get("inline") == ["1"])
         if path == "/api/teacher/students":
             user = self.require("teacher")
             if not user:
@@ -575,10 +634,11 @@ class Handler(BaseHTTPRequestHandler):
             with db() as connection:
                 students = connection.execute(
                     """SELECT s.id, s.name, s.created_at, s.active, x.id AS submission_id,
-                    x.submitted_at, x.release_at, x.released, x.passed, x.total, x.score
-                    FROM students s LEFT JOIN submissions x ON x.id = (
-                      SELECT id FROM submissions WHERE student_id = s.id ORDER BY submitted_at DESC LIMIT 1
-                    ) ORDER BY s.name COLLATE NOCASE"""
+                    x.attempt_number, x.submitted_at, x.release_at, x.released, x.passed,
+                    x.total, x.score,
+                    (SELECT COUNT(*) FROM submissions WHERE student_id = s.id) AS attempts_used
+                    FROM students s LEFT JOIN submissions x ON x.student_id = s.id
+                    ORDER BY s.name COLLATE NOCASE, x.attempt_number"""
                 ).fetchall()
             return self.send_json(200, {"students": [dict(row) for row in students]})
         if path.startswith("/api/teacher/pdf/"):
@@ -593,16 +653,22 @@ class Handler(BaseHTTPRequestHandler):
                 submission = release_due(connection, submission)
                 if not submission["released"]:
                     return self.send_json(403, {"error": "The mark and PDF are not released yet."})
-                return self.send_pdf(submission["pdf_path"], f"{submission['student_id']}-mock-exam-result.pdf")
+                filename = f"{submission['student_id']}-attempt-{submission['attempt_number']}-mock-exam-result.pdf"
+                return self.send_pdf(submission["pdf_path"], filename)
         self.send_json(404, {"error": "API endpoint not found."})
 
-    def submission_json(self, submission):
+    def submission_json(self, submission, attempts_used=None):
+        state = json.loads(submission["state_json"])
         return {
             "id": submission["id"], "submittedAt": submission["submitted_at"],
             "releaseAt": submission["release_at"], "released": bool(submission["released"]),
             "score": submission["score"] if submission["released"] else None,
             "passed": submission["passed"] if submission["released"] else None,
             "total": submission["total"],
+            "attemptNumber": submission["attempt_number"],
+            "attemptsUsed": attempts_used if attempts_used is not None else submission["attempt_number"],
+            "attemptsRemaining": max(0, MAX_EXAM_ATTEMPTS - (attempts_used if attempts_used is not None else submission["attempt_number"])),
+            "theoryAnswers": state.get("theoryAnswers") if isinstance(state.get("theoryAnswers"), dict) else {},
         }
 
     def send_pdf(self, filepath, filename, inline=False):
@@ -635,6 +701,41 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as connection:
                     connection.execute("DELETE FROM sessions WHERE token_hash = ?", (hashlib.sha256(token.encode()).hexdigest(),))
             return self.send_json(200, {"ok": True}, {"Set-Cookie": self.clear_cookie()})
+        if path == "/api/attempts/start":
+            user = self.require("student")
+            if not user:
+                return
+            try:
+                state = safe_state(data.get("state"))
+            except ValueError as error:
+                return self.send_json(400, {"error": str(error)})
+            with db() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                used = submission_count(connection, user["user_id"])
+                progress = connection.execute(
+                    "SELECT attempt_number FROM progress WHERE student_id = ?",
+                    (user["user_id"],),
+                ).fetchone()
+                if used == 0:
+                    return self.send_json(409, {"error": "Submit your current attempt before starting another."})
+                if used >= MAX_EXAM_ATTEMPTS:
+                    return self.send_json(409, {"error": f"You have used all {MAX_EXAM_ATTEMPTS} exam attempts."})
+                if progress and progress["attempt_number"] == used + 1:
+                    return self.send_json(409, {"error": "Your next exam attempt has already started."})
+                if not latest_submission(connection, user["user_id"]):
+                    return self.send_json(409, {"error": "Submit your current attempt before starting another."})
+                attempt_number = used + 1
+                connection.execute(
+                    """INSERT INTO progress (student_id, state_json, updated_at, attempt_number)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(student_id) DO UPDATE SET state_json = excluded.state_json,
+                    updated_at = excluded.updated_at, attempt_number = excluded.attempt_number""",
+                    (user["user_id"], json.dumps(state, ensure_ascii=False), time.time(), attempt_number),
+                )
+            return self.send_json(201, {
+                "attemptNumber": attempt_number,
+                "attemptsRemaining": MAX_EXAM_ATTEMPTS - used,
+            })
         if path == "/api/submit":
             user = self.require("student")
             if not user:
@@ -645,22 +746,29 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(400, {"error": str(error)})
             with db() as connection:
                 connection.execute("BEGIN IMMEDIATE")
-                if latest_submission(connection, user["user_id"]):
-                    return self.send_json(409, {"error": "This exam has already been submitted."})
+                used = submission_count(connection, user["user_id"])
+                if used >= MAX_EXAM_ATTEMPTS:
+                    return self.send_json(409, {"error": f"You have used all {MAX_EXAM_ATTEMPTS} exam attempts."})
+                progress = connection.execute(
+                    "SELECT attempt_number FROM progress WHERE student_id = ?",
+                    (user["user_id"],),
+                ).fetchone()
+                if not progress or progress["attempt_number"] != used + 1:
+                    return self.send_json(409, {"error": "The current exam attempt is not active. Refresh the page and try again."})
                 now = time.time()
                 checks = evaluate(state)
                 passed = sum(checks)
                 submission_id = uuid.uuid4().hex
                 connection.execute(
                     """INSERT INTO submissions
-                    (id, student_id, submitted_at, release_at, state_json, passed, total, score)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (id, student_id, submitted_at, release_at, state_json, passed, total, score, attempt_number)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (submission_id, user["user_id"], now, now + SUBMISSION_DELAY,
                      json.dumps(state, ensure_ascii=False), passed, len(checks),
-                     int(passed * 100 / len(checks) + 0.5)),
+                     int(passed * 100 / len(checks) + 0.5), used + 1),
                 )
                 submission = latest_submission(connection, user["user_id"])
-                return self.send_json(201, self.submission_json(submission))
+                return self.send_json(201, self.submission_json(submission, used + 1))
         if path == "/api/teacher/students":
             user = self.require("teacher")
             if not user:
@@ -756,7 +864,37 @@ class Handler(BaseHTTPRequestHandler):
     def do_PUT(self):
         if not self.check_origin():
             return self.send_json(403, {"error": "Request origin was rejected."})
-        if urlparse(self.path).path != "/api/state":
+        path = urlparse(self.path).path
+        if path == "/api/submission/theory":
+            user = self.require("student")
+            if not user:
+                return
+            try:
+                answers = validated_theory_answers(self.body_json().get("answers"))
+            except (ValueError, UnicodeDecodeError) as error:
+                return self.send_json(400, {"error": str(error)})
+            with db() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                submission = latest_submission(connection, user["user_id"])
+                if not submission:
+                    return self.send_json(404, {"error": "No submitted exam is available to update."})
+                state = json.loads(submission["state_json"])
+                state["theoryAnswers"] = answers
+                state_json = json.dumps(state, ensure_ascii=False)
+                connection.execute(
+                    "UPDATE submissions SET state_json = ? WHERE id = ?",
+                    (state_json, submission["id"]),
+                )
+                if submission["released"]:
+                    checks = evaluate(state)
+                    student = student_record(connection, user["user_id"])
+                    pdf_path = REPORT_DIR / f"{submission['id']}.pdf"
+                    write_submission_pdf(
+                        pdf_path, student, submission, submission["score"],
+                        submission["passed"], checks, state,
+                    )
+            return self.send_json(200, {"ok": True, "answers": answers})
+        if path != "/api/state":
             return self.send_json(404, {"error": "API endpoint not found."})
         user = self.require("student")
         if not user:
@@ -767,12 +905,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(400, {"error": str(error)})
         with db() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if latest_submission(connection, user["user_id"]):
-                return self.send_json(409, {"error": "This exam has already been submitted and is locked."})
+            used = submission_count(connection, user["user_id"])
+            if used >= MAX_EXAM_ATTEMPTS:
+                return self.send_json(409, {"error": f"You have used all {MAX_EXAM_ATTEMPTS} exam attempts."})
+            progress = connection.execute(
+                "SELECT attempt_number FROM progress WHERE student_id = ?",
+                (user["user_id"],),
+            ).fetchone()
+            if (progress and progress["attempt_number"] != used + 1) or (not progress and used > 0):
+                return self.send_json(409, {"error": "This exam attempt is locked. Start a new attempt to continue."})
             connection.execute(
-                """INSERT INTO progress (student_id, state_json, updated_at) VALUES (?, ?, ?)
+                """INSERT INTO progress (student_id, state_json, updated_at, attempt_number) VALUES (?, ?, ?, ?)
                 ON CONFLICT(student_id) DO UPDATE SET state_json = excluded.state_json, updated_at = excluded.updated_at""",
-                (user["user_id"], json.dumps(state, ensure_ascii=False), time.time()),
+                (user["user_id"], json.dumps(state, ensure_ascii=False), time.time(), used + 1),
             )
         self.send_json(200, {"ok": True})
 
