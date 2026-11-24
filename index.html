@@ -294,8 +294,8 @@ const KERNEL = "6.8.0-1017-azure";
 /* ---------------- state ---------------- */
 function freshState() {
   return {
-    v: 1, startedAt: now(), learner: "", practice: true, page: "home", pageArg: null, vmTab: "overview",
-    vms: [], vnets: [], resourceGroups: RGS.slice(), resourceGroupLocations: Object.fromEntries(RGS.map((name) => [name, REGIONS[0]])), activity: [], evidence: [], flags: {}, research: { name: "", cve: "", severity: "", source: "" },
+    v: 1, startedAt: now(), learner: "", practice: true, page: "home", pageArg: null, vmTab: "overview", entraTab: "users",
+    vms: [], vnets: [], webApps: [], entraUsers: [], entraGroups: [], appRegistrations: [], roleAssignments: [], resourceGroups: RGS.slice(), resourceGroupLocations: Object.fromEntries(RGS.map((name) => [name, REGIONS[0]])), activity: [], evidence: [], flags: {}, research: { name: "", cve: "", severity: "", source: "" },
     scenario2: false, scenario3: false, metrics: [], openTask: "t1", notes: "",
   };
 }
@@ -331,6 +331,30 @@ function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = fal
 const vmById = (id) => S.vms.find((v) => v.id === id);
 const sizeOf = (vm) => SIZES.find((s) => s.name === vm.size) || SIZES[1];
 function resourceGroups() { return [...new Set([...RGS, ...(Array.isArray(S.resourceGroups) ? S.resourceGroups : [])])]; }
+function ensureIdentityState() {
+  for (const key of ["entraUsers", "entraGroups", "appRegistrations", "roleAssignments", "webApps"]) {
+    if (!Array.isArray(S[key])) S[key] = [];
+  }
+}
+function directoryPrincipals() {
+  ensureIdentityState();
+  return [
+    ...S.entraUsers.map((x) => ({ id: x.id, name: `${x.name} (${x.upn})`, type: "User", enabled: x.enabled !== false })),
+    ...S.entraGroups.map((x) => ({ id: x.id, name: x.name, type: "Group", enabled: true })),
+    ...S.appRegistrations.map((x) => ({ id: x.id, name: x.name, type: "Application", enabled: true })),
+    ...S.webApps.filter((x) => x.managedIdentity && x.principalId).map((x) => ({ id: x.principalId, name: `${x.name} (managed identity)`, type: "Managed identity", enabled: true })),
+  ];
+}
+function roleScopeOptions() {
+  ensureIdentityState();
+  return [
+    ["subscription", "Subscription: Mock EISA lab"],
+    ...resourceGroups().map((name) => [`rg:${name}`, `Resource group: ${name}`]),
+    ...S.vms.map((vm) => [`vm:${vm.id}`, `Virtual machine: ${vm.name}`]),
+    ...S.vnets.map((network) => [`vnet:${network.rg}/${network.name}`, `Virtual network: ${network.name} (${network.rg})`]),
+    ...S.webApps.map((app) => [`webapp:${app.id}`, `Web app: ${app.name}`]),
+  ];
+}
 function rid() { return Math.random().toString(36).slice(2, 10); }
 function hex(n) { let s = ""; for (let i = 0; i < n; i++) s += "0123456789abcdef"[Math.floor(Math.random() * 16)]; return s; }
 function uuid() { return `${hex(8)}-${hex(4)}-4${hex(3)}-a${hex(3)}-${hex(12)}`; }
@@ -586,6 +610,15 @@ function flagsOf(args) { const f = new Set(); const rest = []; for (const a of a
 function needPkg(sh, pkg, cmd) { if (!sh.L.pkgs[pkg]) return fail(`Command '${cmd}' not found, but can be installed with:\nsudo apt install ${pkg}`, 127); return null; }
 
 /* ---------------- commands ---------------- */
+function addLinuxUser(L, name, { sys = false, createHome = false, shell = "/bin/bash", home = null } = {}) {
+  const uid = sys ? L.nextSysUid-- : 1000 + Object.values(L.users).filter((user) => user.uid >= 1000).length;
+  const user = { uid, gid: uid, home: home || "/home/" + name, shell, sys };
+  L.users[name] = user;
+  L.groups[name] = uid;
+  if (createHome) L.fs[user.home] = { t: "d", mode: 0o750, o: name, g: name, m: now() };
+  return user;
+}
+
 const CMDS = {
   help() { return ok("Supported commands include: ls cd pwd cat echo tee mkdir touch rm cp mv chmod chown useradd id getent passwd groups\nhostname nproc free lsblk blkid df mount umount parted partprobe mkfs.ext4 growpart resize2fs fallocate sha256sum readlink basename\nip ss uname date uptime whoami history clear sudo apt systemctl ufw curl nano grep head tail wc sort\nstress-ng top htop vmstat iostat reboot exit proftpd\n"); },
   clear() { this.sess.lines = []; return ok(); },
@@ -650,9 +683,7 @@ const CMDS = {
     const name = rest[0]; if (!name) return fail("Usage: useradd [options] LOGIN");
     if (this.L.users[name]) return fail(`useradd: user '${name}' already exists`, 9);
     if (!/^[a-z_][a-z0-9_-]*$/.test(name)) return fail(`useradd: invalid user name '${name}'`, 3);
-    const uid = sys ? this.L.nextSysUid-- : 1000 + Object.values(this.L.users).filter((x) => x.uid >= 1000).length;
-    this.L.users[name] = { uid, gid: uid, home: home || "/home/" + name, shell, sys }; this.L.groups[name] = uid;
-    if (create) this.L.fs["/home/" + name] = { t: "d", mode: 0o750, o: name, g: name, m: now() };
+    addLinuxUser(this.L, name, { sys, createHome: create, shell, home });
     act("Linux: useradd " + name, this.vm.name); save(); return ok();
   },
   adduser(a, i, u) { const sys = a.includes("--system"); return CMDS.useradd.call(this, [...(sys ? ["--system"] : ["-m", "-s", "/bin/bash"]), ...a.filter((x) => !x.startsWith("--"))], i, u); },
@@ -1062,7 +1093,7 @@ const NAV = [["createResource", "Create a resource", "plus"], ["theory", "Sectio
 function renderRail() { $("#rail").innerHTML = NAV.map((n) => (n ? `<button type="button" data-nav="${n[0]}" class="${S.page === n[0] || (n[0] === "vms" && S.page === "vm") || (n[0] === "vms" && S.page === "create") ? "active" : ""}">${ICONS[n[2] || n[0]]}${n[1]}</button>` : '<div class="sep"></div>')).join(""); }
 function go(page, arg = null, tab = null) { S.page = page; S.pageArg = arg; if (tab) S.vmTab = tab; save(); renderRail(); renderBlade(); $("#blade").scrollTop = 0; }
 $("#rail").addEventListener("click", (e) => { const b = e.target.closest("[data-nav]"); if (b) go(b.dataset.nav); });
-$("#topSearch").addEventListener("keydown", (e) => { if (e.key !== "Enter") return; const q = e.target.value.toLowerCase(); if (/create|resource/.test(q)) go("createResource"); else if (/virtual m|vm/.test(q)) go("vms"); else if (/net/.test(q)) go("vnets"); else if (/disk/.test(q)) go("disks"); else if (/monitor|metric/.test(q)) go("monitor"); else if (/log|activity/.test(q)) go("activity"); else { const vm = S.vms.find((v) => v.name.toLowerCase().includes(q)); if (vm) go("vm", vm.id, "overview"); else toast("No resources match “" + e.target.value + "”."); } e.target.value = ""; });
+$("#topSearch").addEventListener("keydown", (e) => { if (e.key !== "Enter") return; const q = e.target.value.toLowerCase(); if (/entra|directory|identity/.test(q)) go("entra"); else if (/access control|role assignment|iam|rbac/.test(q)) go("accessControl"); else if (/web ?app|app service/.test(q)) go("webapps"); else if (/create|resource/.test(q)) go("createResource"); else if (/virtual m|vm/.test(q)) go("vms"); else if (/net/.test(q)) go("vnets"); else if (/disk/.test(q)) go("disks"); else if (/monitor|metric/.test(q)) go("monitor"); else if (/log|activity/.test(q)) go("activity"); else { const vm = S.vms.find((v) => v.name.toLowerCase().includes(q)); if (vm) go("vm", vm.id, "overview"); else toast("No resources match “" + e.target.value + "”."); } e.target.value = ""; });
 
 /* ---------------- portal pages ---------------- */
 function statusPill(st) { const c = st === "Running" ? "ok" : /Stopp|Dealloc/.test(st) ? "bad" : "warn"; return `<span class="pill ${c}">${esc(st)}</span>`; }
@@ -1074,6 +1105,11 @@ function renderBlade() {
     if (p === "home") b.innerHTML = pageHome();
     else if (p === "vms") b.innerHTML = pageVms();
     else if (p === "create") { b.innerHTML = pageCreate(); bindCreate(); return; }
+    else if (p === "users") { b.innerHTML = pageUsers(); bindUsers(); return; }
+    else if (p === "entra") { b.innerHTML = pageEntra(); bindEntra(); return; }
+    else if (p === "accessControl") { b.innerHTML = pageAccessControl(); bindAccessControl(); return; }
+    else if (p === "webapps") { b.innerHTML = pageWebApps(); bindWebApps(); return; }
+    else if (p === "webapp") { const app = S.webApps.find((item) => item.id === S.pageArg); if (!app) { go("webapps"); return; } b.innerHTML = webAppDetails(app); return; }
     else if (p === "vm") { const vm = vmById(S.pageArg); if (!vm) { go("vms"); return; } b.innerHTML = pageVm(vm); bindVm(vm); return; }
     else if (p === "vnets") { b.innerHTML = pageVnets(); bindVnets(); return; }
     else if (p === "disks") { b.innerHTML = pageDisks(); bindDisks(); return; }
@@ -1150,9 +1186,18 @@ function pageCreateResource() {
       <button class="card" type="button" data-go="create"><b>Virtual machine</b><span>Create a Linux VM, resource group, OS disk, NIC, public IP, and network security group.</span></button>
       <button class="card" type="button" data-go="vnets"><b>Virtual network</b><span>Create an address space and subnet now, then select it when you deploy a VM.</span></button>
       <button class="card" type="button" data-go="disks"><b>Managed data disk</b><span>Create and attach an exam data disk to a VM, then partition and mount it in Linux.</span></button>
+      <button class="card" type="button" data-go="users"><b>Linux user</b><span>Create a standard or system account on a virtual machine, including the camera_bot service account from the guide.</span></button>
+      <button class="card" type="button" data-go="entra"><b>Microsoft Entra ID</b><span>Manage directory users, security groups, group membership, and app registrations.</span></button>
+      <button class="card" type="button" data-go="accessControl"><b>Access control (IAM)</b><span>Assign and review Azure RBAC roles at subscription, resource-group, or resource scope.</span></button>
+      <button class="card" type="button" data-go="webapps"><b>Web app</b><span>Create and review an Azure App Service web app with a runtime, plan, and optional managed identity.</span></button>
       <button class="card" type="button" id="createResourceGroup"><b>Resource group</b><span>Create a container for the resources in your exam.</span></button>
     </div>
     <h2>Resources provisioned with the VM</h2><div class="note">The VM deployment wizard also creates the network interface, public IP (if selected), network security group, and OS managed disk. Create the required data disks from <b>Virtual machines → your VM → Disks</b>.</div>`;
+}
+function pageUsers() {
+  const rows = S.vms.flatMap((vm) => Object.entries(vm.linux?.users || {}).map(([name, user]) => ({ vm, name, user })));
+  return `<div class="crumb"><a data-go="createResource">Create a resource</a></div><h1>Linux users</h1><p class="sub">Create local accounts on a simulated virtual machine. These are Linux users, not Azure sign-in accounts.</p>
+    ${S.vms.length ? `<div class="cmdbar"><button class="btn primary" type="button" id="createLinuxUser">+ Create user</button></div>${rows.length ? `<div class="tw"><table class="t"><thead><tr><th>Username</th><th>Virtual machine</th><th>Type</th><th>UID / GID</th><th>Home directory</th><th>Shell</th></tr></thead><tbody>${rows.map(({ vm, name, user }) => `<tr><td>${esc(name)}</td><td>${esc(vm.name)}</td><td>${user.sys ? "System" : "Standard"}</td><td>${user.uid} / ${user.gid}</td><td class="mono">${vm.linux?.fs?.[user.home]?.t === "d" ? esc(user.home) : "Not created"}</td><td class="mono">${esc(user.shell)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No user accounts found.</div>`}<div class="note" style="margin-top:12px">Passwords are not managed in this simulator. The guide’s service account can be created as a system user with no home directory and the <span class="mono">/usr/sbin/nologin</span> shell. You can also create it in the VM terminal with <span class="mono">useradd</span>.</div>` : `<div class="panel"><b>Create a virtual machine first.</b><p class="muted">Linux accounts belong to a VM.</p><button class="btn primary" type="button" data-go="create">Create a virtual machine</button></div>`}`;
 }
 function vmTable() { return `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Status</th><th>Size</th><th>Public IP</th><th>Private IP</th></tr></thead><tbody>${S.vms.map((v) => `<tr><td><button class="link" type="button" data-vm="${v.id}">${esc(v.name)}</button></td><td>${esc(v.rg)}</td><td>${statusPill(v.status)}</td><td>${esc(v.size)}</td><td class="mono">${esc(v.pip || "–")}</td><td class="mono">${esc(v.privateIp)}</td></tr>`).join("")}</tbody></table></div>`; }
 function pageVms() { return `<div class="crumb"><a data-go="home">Home</a></div><h1>Virtual machines</h1><p class="sub">Subscription: Mock EISA lab · Quota used: ${S.vms.reduce((a, v) => a + sizeOf(v).vcpu, 0)} of ${QUOTA} vCPUs (South Africa North)</p><div class="cmdbar"><button class="btn primary" type="button" data-go="create">+ Create</button></div>${S.vms.length ? vmTable() : `<div class="panel"><b>No virtual machines yet.</b><p class="muted">Create one to start Task 1.1.</p><button class="btn primary" type="button" data-go="create">+ Create a virtual machine</button></div>`}`; }
@@ -1286,6 +1331,187 @@ function vnetModal(fromWizard = false) {
   });
 }
 function bindCreateResource() { $("#createResourceGroup").onclick = createResourceGroupModal; }
+function bindUsers() { $("#createLinuxUser")?.addEventListener("click", createLinuxUserModal); }
+const RBAC_ROLES = ["Owner", "Contributor", "Reader", "User Access Administrator", "Virtual Machine Contributor", "Website Contributor"];
+function pageEntra() {
+  ensureIdentityState();
+  const tab = ["users", "groups", "apps"].includes(S.entraTab) ? S.entraTab : "users";
+  const tabs = [["users", "Users"], ["groups", "Groups"], ["apps", "App registrations"]];
+  let content = "";
+  if (tab === "users") content = `<div class="cmdbar"><button class="btn primary" type="button" id="entraAddUser">+ New user</button></div>${S.entraUsers.length ? `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>User principal name</th><th>Job title</th><th>Status</th><th></th></tr></thead><tbody>${S.entraUsers.map((user) => `<tr><td>${esc(user.name)}</td><td>${esc(user.upn)}</td><td>${esc(user.jobTitle || "–")}</td><td>${user.enabled === false ? '<span class="pill bad">Blocked</span>' : '<span class="pill ok">Enabled</span>'}</td><td><button class="link" type="button" data-user-toggle="${esc(user.id)}">${user.enabled === false ? "Enable sign-in" : "Block sign-in"}</button></td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No directory users yet. Create a user to use as an access-control principal.</div>`}<p class="muted">Simulated tenant directory only. No Microsoft account, password, invitation, or real sign-in is created.</p>`;
+  if (tab === "groups") content = `<div class="cmdbar"><button class="btn primary" type="button" id="entraAddGroup">+ New group</button></div>${S.entraGroups.length ? `<div class="tw"><table class="t"><thead><tr><th>Group</th><th>Type</th><th>Description</th><th>Members</th><th></th></tr></thead><tbody>${S.entraGroups.map((group) => `<tr><td>${esc(group.name)}</td><td>Security</td><td>${esc(group.description || "–")}</td><td>${group.members.length}</td><td><button class="link" type="button" data-group-members="${esc(group.id)}">Manage members</button></td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No groups yet. Create a security group to practise group-based access assignments.</div>`}`;
+  if (tab === "apps") content = `<div class="cmdbar"><button class="btn primary" type="button" id="entraAddApp">+ New registration</button></div>${S.appRegistrations.length ? `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Application (client) ID</th><th>Redirect URI</th><th></th></tr></thead><tbody>${S.appRegistrations.map((app) => `<tr><td>${esc(app.name)}</td><td class="mono">${esc(app.clientId)}</td><td>${esc(app.redirectUri || "Not configured")}</td><td><span class="muted">No client secret</span></td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No app registrations yet. Register an application to use it as an RBAC principal.</div>`}<p class="muted">Client IDs are simulated. This lab does not issue secrets, tokens, or configure a real application.</p>`;
+  return `<div class="crumb"><a data-go="createResource">Create a resource</a></div><h1>Microsoft Entra ID</h1><p class="sub">Mock EISA lab directory · Manage identities and app registrations for practice. Directory accounts are separate from Linux users and student sign-in.</p><div class="tabs" role="tablist">${tabs.map(([key, title]) => `<button type="button" role="tab" data-entra-tab="${key}" class="${tab === key ? "active" : ""}">${title}</button>`).join("")}</div>${content}<div class="note">This is a local simulation; changes do not create or modify a real Microsoft Entra tenant.</div>`;
+}
+function bindEntra() {
+  $("#blade").querySelectorAll("[data-entra-tab]").forEach((button) => button.addEventListener("click", () => { S.entraTab = button.dataset.entraTab; save(); renderBlade(); }));
+  $("#entraAddUser")?.addEventListener("click", entraUserModal);
+  $("#entraAddGroup")?.addEventListener("click", entraGroupModal);
+  $("#entraAddApp")?.addEventListener("click", appRegistrationModal);
+  $("#blade").querySelectorAll("[data-user-toggle]").forEach((button) => button.addEventListener("click", () => {
+    const user = S.entraUsers.find((item) => item.id === button.dataset.userToggle);
+    if (!user) { toast("That directory user is no longer available."); return; }
+    user.enabled = user.enabled === false;
+    act(user.enabled ? "Enable Entra ID user" : "Block Entra ID user sign-in", user.upn);
+    save(); renderBlade();
+  }));
+  $("#blade").querySelectorAll("[data-group-members]").forEach((button) => button.addEventListener("click", () => groupMembersModal(button.dataset.groupMembers)));
+}
+function entraUserModal() {
+  modal(`<h2 style="margin:0">Create directory user</h2><p class="muted" style="margin:0">Add a simulated user to this lab directory.</p><div class="form"><div class="field"><label for="eu_name">Display name *</label><input id="eu_name" type="text" maxlength="120" autocomplete="off"></div><div class="field"><label for="eu_upn">User principal name *</label><input id="eu_upn" type="email" maxlength="254" placeholder="name@example.test" autocomplete="off"><div class="hint">Use a practice address; this does not send an invitation.</div></div><div class="field"><label for="eu_job">Job title</label><input id="eu_job" type="text" maxlength="120"></div><div class="err" id="eu_err" role="alert"></div></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="eu_cancel">Cancel</button><button class="btn primary" type="button" id="eu_create">Create</button></div>`, () => {
+    $("#eu_cancel").onclick = closeModal;
+    $("#eu_create").onclick = () => {
+      const name = $("#eu_name").value.trim(), upn = $("#eu_upn").value.trim().toLowerCase(), jobTitle = $("#eu_job").value.trim();
+      if (!name) { $("#eu_err").textContent = "Enter a display name."; return; }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(upn)) { $("#eu_err").textContent = "Enter a valid user principal name."; return; }
+      if (S.entraUsers.some((user) => user.upn.toLowerCase() === upn)) { $("#eu_err").textContent = "A user with this user principal name already exists."; return; }
+      const user = { id: rid(), name, upn, jobTitle, enabled: true, created: now() };
+      S.entraUsers.push(user); act("Create Entra ID user", upn); save(); closeModal(); renderBlade(); toast(`Directory user created: ${upn}`);
+    };
+  });
+}
+function entraGroupModal() {
+  modal(`<h2 style="margin:0">Create security group</h2><div class="form"><div class="field"><label for="eg_name">Group name *</label><input id="eg_name" type="text" maxlength="120"></div><div class="field"><label for="eg_desc">Description</label><input id="eg_desc" type="text" maxlength="250"></div><div class="err" id="eg_err" role="alert"></div></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="eg_cancel">Cancel</button><button class="btn primary" type="button" id="eg_create">Create</button></div>`, () => {
+    $("#eg_cancel").onclick = closeModal;
+    $("#eg_create").onclick = () => {
+      const name = $("#eg_name").value.trim(), description = $("#eg_desc").value.trim();
+      if (!name) { $("#eg_err").textContent = "Enter a group name."; return; }
+      if (S.entraGroups.some((group) => group.name.toLowerCase() === name.toLowerCase())) { $("#eg_err").textContent = "A group with this name already exists."; return; }
+      S.entraGroups.push({ id: rid(), name, description, members: [], created: now() });
+      act("Create Entra ID security group", name); save(); closeModal(); renderBlade(); toast(`Security group created: ${name}`);
+    };
+  });
+}
+function groupMembersModal(groupId) {
+  const group = S.entraGroups.find((item) => item.id === groupId);
+  if (!group) { toast("That group is no longer available."); return; }
+  const members = () => group.members.map((id) => S.entraUsers.find((user) => user.id === id)).filter(Boolean);
+  const render = () => `<h2 style="margin:0">Manage members · ${esc(group.name)}</h2><div class="form"><div class="field"><label for="gm_user">Directory user</label><select id="gm_user">${S.entraUsers.filter((user) => !group.members.includes(user.id)).map((user) => `<option value="${esc(user.id)}">${esc(user.name)} — ${esc(user.upn)}</option>`).join("")}</select></div><div class="err" id="gm_err" role="alert"></div></div><div class="tw"><table class="t"><thead><tr><th>Member</th><th>User principal name</th><th></th></tr></thead><tbody>${members().map((user) => `<tr><td>${esc(user.name)}</td><td>${esc(user.upn)}</td><td><button class="link" type="button" data-member-remove="${esc(user.id)}">Remove</button></td></tr>`).join("") || '<tr><td colspan="3">No members.</td></tr>'}</tbody></table></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="gm_close">Close</button><button class="btn primary" type="button" id="gm_add" ${S.entraUsers.every((user) => group.members.includes(user.id)) ? "disabled" : ""}>Add member</button></div>`;
+  const bind = () => {
+    $("#gm_close").onclick = closeModal;
+    $("#gm_add").onclick = () => {
+      const userId = $("#gm_user").value;
+      if (!S.entraUsers.some((user) => user.id === userId) || group.members.includes(userId)) { $("#gm_err").textContent = "Select an available directory user."; return; }
+      group.members.push(userId); act("Add Entra ID group member", `${userId} → ${group.name}`); save(); modal(render(), bind);
+    };
+    $("#mbox").querySelectorAll("[data-member-remove]").forEach((button) => button.addEventListener("click", () => {
+      const user = S.entraUsers.find((item) => item.id === button.dataset.memberRemove);
+      group.members = group.members.filter((id) => id !== button.dataset.memberRemove);
+      act("Remove Entra ID group member", `${user?.upn || button.dataset.memberRemove} ← ${group.name}`); save(); modal(render(), bind);
+    }));
+  };
+  modal(render(), bind);
+}
+function appRegistrationModal() {
+  modal(`<h2 style="margin:0">Register an application</h2><div class="form"><div class="field"><label for="ar_name">Application name *</label><input id="ar_name" type="text" maxlength="120"></div><div class="field"><label for="ar_redirect">Redirect URI</label><input id="ar_redirect" type="url" maxlength="500" placeholder="https://localhost/callback"><div class="hint">Use HTTPS, or HTTP for localhost. Leave blank if not needed.</div></div><div class="err" id="ar_err" role="alert"></div></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="ar_cancel">Cancel</button><button class="btn primary" type="button" id="ar_create">Register</button></div>`, () => {
+    $("#ar_cancel").onclick = closeModal;
+    $("#ar_create").onclick = () => {
+      const name = $("#ar_name").value.trim(), redirectUri = $("#ar_redirect").value.trim();
+      let uri = null;
+      if (!name) { $("#ar_err").textContent = "Enter an application name."; return; }
+      if (redirectUri) {
+        try { uri = new URL(redirectUri); } catch { $("#ar_err").textContent = "Enter a valid redirect URI."; return; }
+        if (uri.protocol !== "https:" && !(uri.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(uri.hostname))) { $("#ar_err").textContent = "Use HTTPS, or HTTP on localhost only."; return; }
+      }
+      const app = { id: rid(), name, clientId: uuid(), redirectUri, created: now() };
+      S.appRegistrations.push(app); act("Register Entra ID application", name); save(); closeModal(); renderBlade(); toast(`Application registered: ${name}`);
+    };
+  });
+}
+function accessScopeLabel(scope) {
+  if (scope === "subscription") return "Subscription: Mock EISA lab";
+  if (scope.startsWith("rg:")) return `Resource group: ${scope.slice(3)}`;
+  if (scope.startsWith("vm:")) return `Virtual machine: ${vmById(scope.slice(3))?.name || "Deleted resource"}`;
+  if (scope.startsWith("webapp:")) return `Web app: ${S.webApps.find((app) => app.id === scope.slice(7))?.name || "Deleted resource"}`;
+  if (scope.startsWith("vnet:")) { const [rg, name] = scope.slice(5).split("/"); const network = S.vnets.find((item) => item.rg === rg && item.name === name); return `Virtual network: ${network ? `${network.name} (${network.rg})` : "Deleted resource"}`; }
+  return scope;
+}
+function pageAccessControl() {
+  ensureIdentityState();
+  const principals = directoryPrincipals();
+  return `<div class="crumb"><a data-go="createResource">Create a resource</a></div><h1>Access control (IAM)</h1><p class="sub">Subscription: Mock EISA lab · Assign Azure RBAC roles to directory users, groups, app registrations, or web-app managed identities.</p><div class="cmdbar"><button class="btn primary" type="button" id="iamAdd">+ Add role assignment</button></div>${S.roleAssignments.length ? `<div class="tw"><table class="t"><thead><tr><th>Principal</th><th>Type</th><th>Role</th><th>Scope</th><th></th></tr></thead><tbody>${S.roleAssignments.map((assignment) => { const principal = principals.find((item) => item.id === assignment.principalId); return `<tr><td>${esc(principal?.name || "Unknown principal")}</td><td>${esc(principal?.type || assignment.principalType || "Unknown")}</td><td>${esc(assignment.role)}</td><td>${esc(accessScopeLabel(assignment.scope))}</td><td><button class="link" type="button" data-assignment-remove="${esc(assignment.id)}">Remove</button></td></tr>`; }).join("")}</tbody></table></div>` : `<div class="panel muted">No role assignments. Add a scoped role assignment to practise least-privilege access.</div>`}<div class="note">Azure RBAC grants access to Azure resources; it is separate from Linux accounts and Entra directory roles. Owner and User Access Administrator can grant access; Contributor and Reader cannot. This is a learning simulation, not an authorization boundary.</div>`;
+}
+function bindAccessControl() {
+  $("#iamAdd").onclick = roleAssignmentModal;
+  $("#blade").querySelectorAll("[data-assignment-remove]").forEach((button) => button.addEventListener("click", () => {
+    const assignment = S.roleAssignments.find((item) => item.id === button.dataset.assignmentRemove);
+    if (!assignment) { toast("That role assignment is no longer available."); return; }
+    S.roleAssignments = S.roleAssignments.filter((item) => item !== assignment);
+    act("Remove role assignment", `${assignment.role} at ${accessScopeLabel(assignment.scope)}`); save(); renderBlade(); toast("Role assignment removed.");
+  }));
+}
+function roleAssignmentModal() {
+  ensureIdentityState();
+  const principals = directoryPrincipals().filter((principal) => principal.enabled);
+  if (!principals.length) { toast("Create or register an Entra ID principal before assigning a role."); go("entra"); return; }
+  const scopes = roleScopeOptions();
+  modal(`<h2 style="margin:0">Add role assignment</h2><p class="muted" style="margin:0">Choose a principal, built-in role, and scope.</p><div class="form"><div class="field"><label for="ia_principal">Member *</label><select id="ia_principal">${principals.map((principal) => `<option value="${esc(principal.id)}">${esc(principal.type)} · ${esc(principal.name)}</option>`).join("")}</select></div><div class="field"><label for="ia_role">Role *</label><select id="ia_role">${RBAC_ROLES.map((role) => `<option>${esc(role)}</option>`).join("")}</select></div><div class="field"><label for="ia_scope">Scope *</label><select id="ia_scope">${scopes.map(([value, label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join("")}</select></div><div class="err" id="ia_err" role="alert"></div></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="ia_cancel">Cancel</button><button class="btn primary" type="button" id="ia_create">Review + assign</button></div>`, () => {
+    $("#ia_cancel").onclick = closeModal;
+    $("#ia_create").onclick = () => {
+      const principal = directoryPrincipals().find((item) => item.id === $("#ia_principal").value);
+      const role = $("#ia_role").value, scope = $("#ia_scope").value;
+      if (!principal || !principal.enabled) { $("#ia_err").textContent = "Select an enabled principal."; return; }
+      if (!roleScopeOptions().some(([value]) => value === scope)) { $("#ia_err").textContent = "Select an available scope."; return; }
+      if (S.roleAssignments.some((item) => item.principalId === principal.id && item.role === role && item.scope === scope)) { $("#ia_err").textContent = "This principal already has that role at this scope."; return; }
+      S.roleAssignments.push({ id: rid(), principalId: principal.id, principalType: principal.type, role, scope, assigned: now() });
+      act("Assign Azure RBAC role", `${role} to ${principal.name} at ${accessScopeLabel(scope)}`); save(); closeModal(); renderBlade(); toast(`Assigned ${role} to ${principal.name}`);
+    };
+  });
+}
+function pageWebApps() {
+  ensureIdentityState();
+  return `<div class="crumb"><a data-go="createResource">Create a resource</a></div><h1>App Services · Web apps</h1><p class="sub">Create and configure simulated Azure App Service apps. No cloud resources or external sites are deployed.</p><div class="cmdbar"><button class="btn primary" type="button" id="webAppCreate">+ Create</button></div>${S.webApps.length ? `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Runtime</th><th>Region</th><th>Plan</th><th>Status</th></tr></thead><tbody>${S.webApps.map((app) => `<tr><td><button class="link" type="button" data-webapp="${esc(app.id)}">${esc(app.name)}</button><div class="mono muted">${esc(app.url)}</div></td><td>${esc(app.rg)}</td><td>${esc(app.runtime)} · ${esc(app.os)}</td><td>${esc(app.region)}</td><td>${esc(app.plan)}</td><td>${statusPill(app.status)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No web apps yet. Create an App Service web app to practise selecting a runtime, region, plan, and managed identity.</div>`}`;
+}
+function webAppDetails(app) {
+  return `<div class="crumb"><a data-go="webapps">Web apps</a> › ${esc(app.name)}</div><h1>${esc(app.name)}</h1><p class="sub">${statusPill(app.status)} <span class="mono">${esc(app.url)}</span></p><div class="panel"><h2>Overview</h2><dl class="kv"><dt>Resource group</dt><dd>${esc(app.rg)}</dd><dt>Region</dt><dd>${esc(app.region)}</dd><dt>Runtime stack</dt><dd>${esc(app.runtime)} on ${esc(app.os)}</dd><dt>App Service plan</dt><dd>${esc(app.plan)}</dd><dt>HTTPS only</dt><dd>Enabled</dd><dt>System-assigned managed identity</dt><dd>${app.managedIdentity ? `Enabled · principal ${esc(app.principalId)}` : "Disabled"}</dd></dl></div>${app.managedIdentity ? `<div class="note">This app's managed identity is available as a principal under <a data-go="accessControl">Access control (IAM)</a>.</div>` : `<div class="note">Enable a system-assigned managed identity when creating an app to use it in Azure RBAC role assignments.</div>`}`;
+}
+function bindWebApps() {
+  $("#webAppCreate").onclick = webAppModal;
+  $("#blade").querySelectorAll("[data-webapp]").forEach((button) => button.addEventListener("click", () => go("webapp", button.dataset.webapp)));
+}
+function webAppModal() {
+  const runtimes = ["Node.js 22 LTS", "Python 3.12", ".NET 8", "Java 21", "PHP 8.3"];
+  modal(`<h2 style="margin:0">Create web app</h2><p class="muted" style="margin:0">Configure a simulated Azure App Service deployment.</p><div class="form"><div class="field"><label for="wa_name">Web app name *</label><input id="wa_name" type="text" maxlength="60" placeholder="my-eisa-webapp"><div class="hint">Use 2–60 lowercase letters, numbers, and internal hyphens; the name must be globally unique in this lab.</div></div><div class="field"><label for="wa_rg">Resource group *</label><select id="wa_rg">${resourceGroups().map((group) => `<option>${esc(group)}</option>`).join("")}</select></div><div class="field"><label for="wa_region">Region *</label><select id="wa_region">${REGIONS.map((region) => `<option>${esc(region)}</option>`).join("")}</select></div><div class="field"><label for="wa_os">Operating system *</label><select id="wa_os"><option>Linux</option><option>Windows</option></select></div><div class="field"><label for="wa_runtime">Runtime stack *</label><select id="wa_runtime">${runtimes.map((runtime) => `<option>${esc(runtime)}</option>`).join("")}</select></div><div class="field"><label for="wa_plan">App Service plan *</label><select id="wa_plan"><option>Free F1</option><option>Basic B1</option><option>Standard S1</option></select></div><div class="field"><label for="wa_identity">Identity</label><div><label><input id="wa_identity" type="checkbox"> Enable system-assigned managed identity</label><div class="hint">This creates a simulated service principal that can receive scoped RBAC roles.</div></div></div><div class="err" id="wa_err" role="alert"></div></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="wa_cancel">Cancel</button><button class="btn primary" type="button" id="wa_create">Review + create</button></div>`, () => {
+    $("#wa_cancel").onclick = closeModal;
+    $("#wa_create").onclick = () => {
+      const name = $("#wa_name").value.trim(), rg = $("#wa_rg").value, region = $("#wa_region").value, os = $("#wa_os").value, runtime = $("#wa_runtime").value, plan = $("#wa_plan").value, managedIdentity = $("#wa_identity").checked;
+      if (!/^[a-z0-9](?:[a-z0-9-]{0,58}[a-z0-9])$/.test(name)) { $("#wa_err").textContent = "Use 2–60 lowercase letters, numbers, or internal hyphens; start and end with a letter or number."; return; }
+      if (S.webApps.some((app) => app.name.toLowerCase() === name.toLowerCase())) { $("#wa_err").textContent = "That web app name is already in use in this lab."; return; }
+      const app = { id: rid(), name, rg, region, os, runtime, plan, managedIdentity, principalId: managedIdentity ? uuid() : null, url: `https://${name}.azurewebsites.net`, status: "Running", httpsOnly: true, created: now() };
+      S.webApps.push(app); act("Create App Service web app", `${name} (${rg})`); save(); closeModal(); renderBlade(); toast(`Web app created: ${name}`);
+    };
+  });
+}
+function createLinuxUserModal() {
+  if (!S.vms.length) { toast("Create a virtual machine before creating a Linux user."); return; }
+  modal(`<h2 style="margin:0">Create Linux user</h2><p class="muted" style="margin:0">Add a local account to a virtual machine.</p><div class="form">
+    <div class="field"><label for="lu_vm">Virtual machine</label><select id="lu_vm">${S.vms.map((vm) => `<option value="${esc(vm.id)}">${esc(vm.name)} — ${esc(vm.rg)}</option>`).join("")}</select></div>
+    <div class="field"><label for="lu_name">Username *</label><input id="lu_name" type="text" autocomplete="off" maxlength="32"><div class="hint">Use lowercase letters, numbers, underscores, or hyphens; start with a letter or underscore.</div></div>
+    <div class="field"><label for="lu_type">Account type</label><select id="lu_type"><option value="standard">Standard user</option><option value="system">System service account</option></select></div>
+    <div class="field"><label for="lu_shell">Login shell</label><select id="lu_shell"><option value="/bin/bash">/bin/bash</option><option value="/bin/sh">/bin/sh</option><option value="/usr/sbin/nologin">/usr/sbin/nologin</option></select></div>
+    <div class="field"><label for="lu_home">Home directory</label><div><label><input id="lu_home" type="checkbox" checked> Create /home/&lt;username&gt;</label><div class="hint">System service accounts normally do not need a home directory.</div></div></div>
+    <div class="err" id="lu_err" role="alert"></div></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="lu_cancel">Cancel</button><button class="btn primary" type="button" id="lu_create">Create</button></div>`, () => {
+    $("#lu_cancel").onclick = closeModal;
+    $("#lu_type").onchange = () => {
+      const system = $("#lu_type").value === "system";
+      $("#lu_shell").value = system ? "/usr/sbin/nologin" : "/bin/bash";
+      $("#lu_home").checked = !system;
+    };
+    $("#lu_create").onclick = () => {
+      const vm = vmById($("#lu_vm").value);
+      const name = $("#lu_name").value.trim();
+      if (!vm) { $("#lu_err").textContent = "Select a virtual machine."; return; }
+      if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(name)) { $("#lu_err").textContent = "Use 1–32 lowercase letters, numbers, underscores, or hyphens; start with a letter or underscore."; return; }
+      if (!vm.linux) vm.linux = newLinux(vm);
+      if (vm.linux.users[name]) { $("#lu_err").textContent = `The user "${name}" already exists on ${vm.name}.`; return; }
+      const system = $("#lu_type").value === "system";
+      const user = addLinuxUser(vm.linux, name, { sys: system, createHome: $("#lu_home").checked, shell: $("#lu_shell").value });
+      act("Create Linux user", `${name} on ${vm.name}`);
+      save(); closeModal(); renderBlade(); renderDrawer();
+      toast(`Linux user created: ${name} on ${vm.name}${user.sys ? " (system account)" : ""}`);
+    };
+  });
+}
 function bindVnets() { $("#createVnet").onclick = () => vnetModal(false); }
 function bindDisks() { $("#createDisk").onclick = chooseVmForDisk; }
 function createResourceGroupModal() {
