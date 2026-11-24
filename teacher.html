@@ -47,6 +47,17 @@ code{font-size:13px}.credentials{max-height:380px;overflow:auto}@media print{.no
         <div class="scroll credentials"><table><thead><tr><th>Name</th><th>Student ID</th><th>Temporary password</th></tr></thead><tbody id="credentials"></tbody></table></div>
       </div>
     </section>
+    <section class="panel noprint">
+      <h2>Restore saved student credentials</h2>
+      <p class="muted">Import a JSON backup containing up to 50 records with <code>id</code>, <code>name</code>, and <code>password</code> fields. Existing student IDs are skipped and never changed.</p>
+      <form id="restoreForm">
+        <label for="restoreFile">Credentials backup</label>
+        <input id="restoreFile" type="file" accept=".json,application/json" required>
+        <p class="error" id="restoreError" role="alert"></p>
+        <p class="success" id="restoreStatus" role="status"></p>
+        <button type="submit">Restore missing accounts</button>
+      </form>
+    </section>
     <section class="panel">
       <div class="bar"><div style="flex:1"><h2 style="margin:0">Student results</h2><span class="muted">Marks and PDFs become available five minutes after submission.</span></div><button id="refresh" class="secondary" type="button">Refresh results</button></div>
       <p class="error" id="resultsError" role="alert"></p>
@@ -117,6 +128,29 @@ document.querySelector("#rosterForm").addEventListener("submit", async (event) =
     document.querySelector("#names").value = "";
     await loadStudents();
   } catch (error) { document.querySelector("#rosterError").textContent = error.message; }
+});
+document.querySelector("#restoreForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const file = document.querySelector("#restoreFile").files[0];
+  const errorElement = document.querySelector("#restoreError");
+  const statusElement = document.querySelector("#restoreStatus");
+  errorElement.textContent = "";
+  statusElement.textContent = "";
+  if (!file) {
+    errorElement.textContent = "Choose a JSON credentials backup.";
+    return;
+  }
+  try {
+    const records = JSON.parse(await file.text());
+    if (!Array.isArray(records)) throw new Error("The backup must contain a JSON array of student records.");
+    const result = await api("/api/teacher/students/import", {
+      method: "POST",
+      body: JSON.stringify({ students: records })
+    });
+    statusElement.textContent = `Restored ${result.created} account(s). ${result.skipped} existing ID(s) were left unchanged.`;
+    document.querySelector("#restoreFile").value = "";
+    await loadStudents();
+  } catch (error) { errorElement.textContent = error.message; }
 });
 document.querySelector("#downloadCredentials").onclick = () => {
   const quote = (value) => `"${String(value).replace(/"/g, '""')}"`;

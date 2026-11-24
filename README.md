@@ -23,6 +23,8 @@ Local data and generated PDFs are stored in the `data` folder. Keep this folder 
 
 The SQLite database and result PDFs are stored on the volume, so they persist across deploys. Do not remove the volume or run multiple service replicas against this SQLite database. Back up the volume; it contains student names, work, marks, and evidence.
 
+To restore saved accounts, sign in as the teacher and use **Restore saved student credentials** with a JSON array of `{ "id": "EISA-XXXXXX", "name": "...", "password": "..." }` records. Existing IDs are skipped without changing their names or passwords.
+
 ## Exam workflow
 
 - The simulated **Create a resource** hub lets students create resource groups, virtual networks and subnets, VMs, attached data disks, standard or system Linux users, Microsoft Entra directory users and groups, app registrations, Azure RBAC role assignments, and App Service web apps. For the guide's `camera_bot` account, choose a system account, disable its home directory, and select `/usr/sbin/nologin`; the same steps can also be practised in the VM terminal with `useradd`. Entra identities and role assignments are local learning data, not real Microsoft accounts or an authorization boundary. Web apps are simulated and do not deploy to Azure. VM images include Ubuntu, Debian, AlmaLinux, Red Hat Enterprise Linux, SUSE Linux Enterprise Server, Windows 11 Enterprise, and Windows Server 2022/2025. VM deployment also provisions its NIC, public IP (if selected), network security group, and OS disk.

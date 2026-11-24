@@ -603,6 +603,44 @@ class Handler(BaseHTTPRequestHandler):
             if not credentials:
                 return self.send_json(400, {"error": "Enter at least one non-empty student name."})
             return self.send_json(201, {"students": credentials})
+        if path == "/api/teacher/students/import":
+            user = self.require("teacher")
+            if not user:
+                return
+            records = data.get("students")
+            if not isinstance(records, list) or not records or len(records) > 50:
+                return self.send_json(400, {"error": "Provide between 1 and 50 saved student records."})
+            normalized = []
+            seen_ids = set()
+            for record in records:
+                if not isinstance(record, dict):
+                    return self.send_json(400, {"error": "Each saved student record must include an ID, name, and password."})
+                student_id = str(record.get("id", "")).strip().upper()
+                name = " ".join(str(record.get("name", "")).split())[:100]
+                password = str(record.get("password", ""))
+                if not re.fullmatch(r"EISA-[A-F0-9]{6}", student_id):
+                    return self.send_json(400, {"error": "Each saved student ID must use the EISA-XXXXXX format."})
+                if not name or not password or len(password) > 256:
+                    return self.send_json(400, {"error": "Each saved student record must include a name and a password of up to 256 characters."})
+                if student_id in seen_ids:
+                    return self.send_json(400, {"error": "The saved records contain a duplicate student ID."})
+                seen_ids.add(student_id)
+                normalized.append((student_id, name, password))
+            created = 0
+            skipped = 0
+            with db() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                for student_id, name, password in normalized:
+                    if student_record(connection, student_id):
+                        skipped += 1
+                        continue
+                    salt = secrets.token_bytes(16)
+                    connection.execute(
+                        "INSERT INTO students (id, name, salt, password_hash, created_at) VALUES (?, ?, ?, ?, ?)",
+                        (student_id, name, salt, password_digest(password, salt), time.time()),
+                    )
+                    created += 1
+            return self.send_json(201, {"created": created, "skipped": skipped})
         self.send_json(404, {"error": "API endpoint not found."})
 
     def login(self, data):
