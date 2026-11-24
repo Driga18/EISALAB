@@ -236,6 +236,27 @@ def at(value, *keys, default=None):
     return value if value is not None else default
 
 
+def traffic_log_partition(vm):
+    disks = vm.get("dataDisks") or []
+    if any(disk.get("lun") == 0 and disk.get("size") == 8 for disk in disks):
+        return "sdc1"
+    return None
+
+
+def has_persistent_fstab_mount(linux, fstab, mountpoint, partition):
+    parts = linux.get("parts") or {}
+    part = parts.get(partition) or {}
+    mounts = linux.get("mounts") or {}
+    if not part.get("uuid") or part.get("fs") != "ext4" or mounts.get(mountpoint) != partition:
+        return False
+    expected_source = f"UUID={part['uuid']}"
+    for line in str(fstab).splitlines():
+        fields = line.split("#", 1)[0].split()
+        if len(fields) >= 4 and fields[0] == expected_source and fields[1] == mountpoint and fields[2] == "ext4":
+            return True
+    return False
+
+
 def evaluate(state):
     vm = get_vm(state)
     linux = vm.get("linux") or {}
@@ -250,6 +271,7 @@ def evaluate(state):
     cam = users.get("camera_bot") or {}
     cam_file = files.get("/var/traffic_logs/cam_feed_01.log") or {}
     log_part = mounts.get("/var/traffic_logs")
+    expected_log_part = traffic_log_partition(vm)
     log_memo = files.get(f"/home/{vm.get('admin', '')}/security_memo.txt") or {}
     memo = str(log_memo.get("c", "")).lower()
     rules = at(linux, "ufw", "rules", default=[]) or []
@@ -265,9 +287,9 @@ def evaluate(state):
         bool(flags.get("ipShown50")),
         bool(at(linux, "services", "nginx", "run")),
         bool(flags.get("browserOK")),
-        any(d.get("size") == 8 for d in disks),
-        bool(log_part and at(parts, log_part, "fs") == "ext4" and re.search(r"\d$", str(log_part))),
-        bool(re.search(r"/var/traffic_logs", str(fstab)) and flags.get("rebootMountOK")),
+        any(d.get("lun") == 0 and d.get("size") == 8 for d in disks),
+        bool(expected_log_part and log_part == expected_log_part and at(parts, expected_log_part, "fs") == "ext4"),
+        bool(expected_log_part and log_part == expected_log_part and flags.get("rebootMountOK") and has_persistent_fstab_mount(linux, fstab, "/var/traffic_logs", expected_log_part)),
         bool(cam and isinstance(cam.get("uid"), (int, float)) and cam["uid"] < 1000 and re.search(r"nologin|false", str(cam.get("shell", "")))),
         cam_file.get("o") == "camera_bot",
         bool(flags.get("cpuObserved")),
