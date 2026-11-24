@@ -904,10 +904,9 @@ function hasPersistentFstabMount(vm, dir, partition) {
       fields[0] === `UUID=${part.uuid}` && fields[1] === dir && fields[2] === "ext4";
   });
 }
-function trafficLogPartition(vm) {
-  return vm?.dataDisks?.some((disk) => disk.lun === 0 && disk.size === 8)
-    ? devOfLun(vm, 0) + "1"
-    : null;
+function trafficLogPartitions(vm) {
+  return (vm?.dataDisks || []).filter((disk) => disk.size === 8)
+    .map((disk) => devOfLun(vm, disk.lun) + "1");
 }
 function afterUfwChange(vm) {
   // existing SSH sessions drop if ufw blocks 22
@@ -1043,7 +1042,7 @@ async function remoteCmd(s, line) {
 function rebootVM(vm, why) {
   for (const s of sessions) if (s.vmId === vm.id && s.remote) dropSession(s, `Connection to ${vm.pip} closed by remote host.`);
   vm.status = "Restarting"; act("Restart virtual machine (" + why + ")", vm.name); save(); renderBlade();
-  setTimeout(() => { vm.status = "Running"; vm.bootAt = now(); const L = vm.linux; L.load = { cpu: 0, vm: 0, hdd: 0, hddDev: "sda" }; for (const k of Object.keys(L.mounts)) if (k !== "/" && k !== "/mnt") delete L.mounts[k]; for (const dd of vm.dataDisks) L.seen[devOfLun(vm, dd.lun)] = dd.size; mountFstab(vm); for (const s of Object.values(L.services)) s.run = s.en; const part = trafficLogPartition(vm); const mounted = !!(part && hasPersistentFstabMount(vm, "/var/traffic_logs", part)); vm.rebootedWithLogs = mounted; flag("rebootMountOK", mounted); save(); renderBlade(); toast(`${vm.name} restarted. Reconnect with ssh.`); }, 4500);
+  setTimeout(() => { vm.status = "Running"; vm.bootAt = now(); const L = vm.linux; L.load = { cpu: 0, vm: 0, hdd: 0, hddDev: "sda" }; for (const k of Object.keys(L.mounts)) if (k !== "/" && k !== "/mnt") delete L.mounts[k]; for (const dd of vm.dataDisks) L.seen[devOfLun(vm, dd.lun)] = dd.size; mountFstab(vm); for (const s of Object.values(L.services)) s.run = s.en; const mounted = trafficLogPartitions(vm).some((part) => hasPersistentFstabMount(vm, "/var/traffic_logs", part)); vm.rebootedWithLogs = mounted; flag("rebootMountOK", mounted); save(); renderBlade(); toast(`${vm.name} restarted. Reconnect with ssh.`); }, 4500);
 }
 function startTop(s, vm, which) {
   let timer; const draw = () => {
@@ -1639,7 +1638,7 @@ function bindVm(vm) {
 function vmAction(vm, a) {
   if (a === "connect") { S.vmTab = "connect"; renderBlade(); return; }
   if (a === "openterm") { $("#dock").classList.remove("min"); if (activeSess.remote) { const s = newLocal(); activeSess = s; } renderTabs(); renderTerm.focus = true; renderTerm(); return; }
-  if (a === "start") { vm.status = "Starting"; renderBlade(); setTimeout(() => { vm.status = "Running"; vm.bootAt = now(); const L = vm.linux; for (const dd of vm.dataDisks) L.seen[devOfLun(vm, dd.lun)] = dd.size; for (const k of Object.keys(L.mounts)) if (k !== "/" && k !== "/mnt") delete L.mounts[k]; mountFstab(vm); for (const s of Object.values(L.services)) s.run = s.en; const part = trafficLogPartition(vm); const mounted = !!(part && hasPersistentFstabMount(vm, "/var/traffic_logs", part)); vm.rebootedWithLogs = mounted; flag("rebootMountOK", mounted); act("Start virtual machine", vm.name); save(); renderBlade(); }, 2500); return; }
+  if (a === "start") { vm.status = "Starting"; renderBlade(); setTimeout(() => { vm.status = "Running"; vm.bootAt = now(); const L = vm.linux; for (const dd of vm.dataDisks) L.seen[devOfLun(vm, dd.lun)] = dd.size; for (const k of Object.keys(L.mounts)) if (k !== "/" && k !== "/mnt") delete L.mounts[k]; mountFstab(vm); for (const s of Object.values(L.services)) s.run = s.en; const mounted = trafficLogPartitions(vm).some((part) => hasPersistentFstabMount(vm, "/var/traffic_logs", part)); vm.rebootedWithLogs = mounted; flag("rebootMountOK", mounted); act("Start virtual machine", vm.name); save(); renderBlade(); }, 2500); return; }
   if (a === "restart") { rebootVM(vm, "portal"); return; }
   if (a === "stop") { for (const s of sessions) if (s.vmId === vm.id) dropSession(s, "Connection reset by peer"); vm.status = "Stopping"; renderBlade(); setTimeout(() => { vm.status = "Stopped (deallocated)"; act("Deallocate virtual machine", vm.name); save(); renderBlade(); }, 2000); return; }
   if (a === "delete") { modal(`<h2 style="margin:0">Delete ${esc(vm.name)}?</h2><p>This deletes the VM, its disks, network interface and public IP from the lab. Your evidence and activity log are kept.</p><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="dl_no">Cancel</button><button class="btn primary" type="button" id="dl_yes">Delete</button></div>`, () => { $("#dl_no").onclick = closeModal; $("#dl_yes").onclick = () => { for (const s of sessions) if (s.vmId === vm.id) dropSession(s, "Connection reset by peer"); S.vms = S.vms.filter((v) => v !== vm); act("Delete virtual machine", vm.name); closeModal(); go("vms"); renderDrawer(); }; }); return; }
@@ -1769,9 +1768,9 @@ const CHECKS = [
   { task: "t1", sub: "1.2", label: "Shown 10.0.0.50 inside the VM (ip addr)", test: () => !!S.flags.ipShown50 },
   { task: "t1", sub: "1.2", label: "nginx installed and running", test: () => !!L1()?.services.nginx?.run },
   { task: "t1", sub: "1.2", label: "Control panel opened in the browser via the public IP", test: () => !!S.flags.browserOK },
-  { task: "t1", sub: "1.3", label: "8 GiB data disk attached", test: () => !!vm1()?.dataDisks.some((d) => d.lun === 0 && d.size === 8) },
-  { task: "t1", sub: "1.3", label: "Partition formatted ext4 and mounted at /var/traffic_logs", test: () => { const v = vm1(); const L = L1(); const p = trafficLogPartition(v); return !!(p && L?.mounts["/var/traffic_logs"] === p && L.parts[p]?.fs === "ext4"); } },
-  { task: "t1", sub: "1.3", label: "Mount is permanent (/etc/fstab) and survived a reboot", test: () => { const v = vm1(); const p = trafficLogPartition(v); return !!(p && S.flags.rebootMountOK && hasPersistentFstabMount(v, "/var/traffic_logs", p)); } },
+  { task: "t1", sub: "1.3", label: "8 GiB data disk attached", test: () => !!vm1()?.dataDisks.some((d) => d.size === 8) },
+  { task: "t1", sub: "1.3", label: "Partition formatted ext4 and mounted at /var/traffic_logs", test: () => { const v = vm1(); const L = L1(); return trafficLogPartitions(v).some((p) => L?.mounts["/var/traffic_logs"] === p && L.parts[p]?.fs === "ext4"); } },
+  { task: "t1", sub: "1.3", label: "Mount is permanent (/etc/fstab) and survived a reboot", test: () => { const v = vm1(); return !!S.flags.rebootMountOK && trafficLogPartitions(v).some((p) => hasPersistentFstabMount(v, "/var/traffic_logs", p)); } },
   { task: "t1", sub: "1.4", label: "System user camera_bot exists (no login shell)", test: () => { const u = L1()?.users.camera_bot; return !!(u && u.uid < 1000 && /nologin|false/.test(u.shell)); } },
   { task: "t1", sub: "1.4", label: "/var/traffic_logs/cam_feed_01.log owned by camera_bot", test: () => L1()?.fs["/var/traffic_logs/cam_feed_01.log"]?.o === "camera_bot" },
   { task: "t2", sub: "2.1", label: "CPU load created and watched live (top/htop) above 90%", test: () => !!S.flags.cpuObserved },
@@ -1797,8 +1796,8 @@ const TASKS = [
   { id: "t1", title: "Task 1 · MetroTraffic fog node", brief: "MetroTraffic Control needs a ‘fog node’ near its street cameras: a small server with a fixed IP, a web control panel, a separate partition for video logs and a service account for the camera feed.",
     subs: [
       ["1.1", "Deploy the instance", "Create Traffic-Node-1: 1 vCPU, 2 GB RAM, Ubuntu, connected to a network you can reach (cloud equivalent of bridged mode). The paper asks for a 15 GB boot disk; the cloud minimum is 30 GiB – note this in your evidence.", "Portal: Virtual machines ▸ + Create\n  Name Traffic-Node-1 · Size Standard_B1ms\n  Password auth, username e.g. trafficadmin\n  Networking ▸ Create new: 10.0.0.0/16, subnet 10.0.0.0/24\n  Inbound ports: SSH (22) and HTTP (80)\nLaptop terminal:\n  ssh trafficadmin@<public-ip>\n  hostname; nproc; free -h; lsblk"],
-      ["1.2", "Static IP and control panel", "Give the node the fixed IP 10.0.0.50 and install a web server that serves the control panel.", "Portal: VM ▸ Networking ▸ IP configurations ▸ Static 10.0.0.50\nThen reconnect and run:\n  ip addr show eth0\n  sudo apt update\n  sudo apt install -y nginx\n  echo '<h1>MetroTraffic Control Panel</h1>' | sudo tee /var/www/html/index.html\nOpen Web browser ▸ http://<public-ip>"],
-      ["1.3", "8 GB log partition", "Add an 8 GB disk, partition and format it, mount it permanently at /var/traffic_logs.", "Portal: VM ▸ Disks ▸ + Create and attach (LUN 0, 8 GiB)\n  DEV=$(readlink -f /dev/disk/azure/scsi1/lun0)\n  sudo parted -s $DEV mklabel gpt mkpart primary ext4 0% 100%\n  sudo partprobe $DEV\n  sudo mkfs.ext4 -F ${DEV}1\n  sudo mkdir -p /var/traffic_logs\n  UUID=$(sudo blkid -s UUID -o value ${DEV}1)\n  echo \"UUID=$UUID /var/traffic_logs ext4 defaults,nofail 0 2\" | sudo tee -a /etc/fstab\n  sudo mount -a\n  df -hT /var/traffic_logs\n  sudo reboot   (then reconnect and check df again)"],
+      ["1.2", "Static IP and control panel", "Give the node the fixed IP 10.0.0.50 and install a web server that serves the control panel.", "Portal: VM ▸ Networking ▸ IP configurations ▸ Static 10.0.0.50\nThen reconnect and run these commands one at a time (copy commands only, not the guide heading):\n  ip addr show eth0\n  sudo apt update\n  sudo apt install -y nginx\n  echo '<h1>MetroTraffic Control Panel</h1>' | sudo tee /var/www/html/index.html\nOpen Web browser ▸ http://<public-ip>"],
+      ["1.3", "8 GB log partition", "Add an 8 GB disk, partition and format it, mount it permanently at /var/traffic_logs.", "Portal: VM ▸ Disks ▸ + Create and attach an 8 GiB disk. Note its assigned LUN; do not modify an existing disk.\nRun each command below as a separate terminal command. In this example the new disk is LUN 1; use the LUN shown for your 8 GiB disk in the portal.\n  lsblk -o NAME,SIZE,TYPE,MOUNTPOINTS\n  LUN=1\n  DEV=$(readlink -f \"/dev/disk/azure/scsi1/lun${LUN}\")\nCheck that DEV is the unpartitioned 8 GiB disk before continuing:\n  lsblk \"$DEV\"\n  sudo parted -s \"$DEV\" mklabel gpt mkpart primary ext4 0% 100%\n  sudo partprobe \"$DEV\"\n  sudo mkfs.ext4 -F \"${DEV}1\"\n  sudo mkdir -p /var/traffic_logs\n  UUID=$(sudo blkid -s UUID -o value \"${DEV}1\")\n  echo \"UUID=$UUID /var/traffic_logs ext4 defaults,nofail 0 2\" | sudo tee -a /etc/fstab\n  sudo mount -a\n  df -hT /var/traffic_logs\n  sudo reboot   (then reconnect and check df again)"],
       ["1.4", "camera_bot service account", "Create a system user camera_bot and a log file it owns on the new partition.", "  sudo useradd --system --no-create-home --shell /usr/sbin/nologin camera_bot\n  echo 'CAM-01 vehicle_count=42' | sudo tee /var/traffic_logs/cam_feed_01.log\n  sudo chown camera_bot:camera_bot /var/traffic_logs/cam_feed_01.log\n  ls -l /var/traffic_logs"],
     ] },
   { id: "t2", title: "Task 2 · FragFest game server", brief: "FragFest E-Sports is running a live tournament on this server. Players report lag, kernel patches must be checked, and the Replays disk is 99% full.",
