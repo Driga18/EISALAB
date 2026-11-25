@@ -354,6 +354,31 @@ function act(op, target, status = "Succeeded") { S.activity.unshift({ t: now(), 
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => (t.hidden = true), 3200); }
 const vmById = (id) => S.vms.find((v) => v.id === id);
 const sizeOf = (vm) => SIZES.find((s) => s.name === vm.size) || SIZES[1];
+function replayFingerprint(vm) {
+  const file = vm?.linux?.fs["/var/replays/grand_final.replay"];
+  return file ? hash64((file.c || "") + "#" + (file.size || 0)) : "";
+}
+function replayDiskUsage(vm) {
+  const L = vm?.linux;
+  const partition = L?.parts[L.mounts["/var/replays"]];
+  if (!partition || !L.mounts["/var/replays"]) return null;
+  const used = fsUsed(L, "/var/replays");
+  return { used, total: partition.size, percent: partition.size ? Math.round(used / (partition.size * 0.95) * 100) : 0 };
+}
+function recordReplayFingerprint(vm, fingerprint, afterResize = false) {
+  const L = vm?.linux;
+  if (!L || !fingerprint) return false;
+  if (afterResize) {
+    L.guiReplayHashAfter = fingerprint;
+    const intact = !!L.guiReplayHashBefore && L.guiReplayHashBefore === fingerprint;
+    flag("hashAfter", intact);
+    return intact;
+  }
+  L.guiReplayHashBefore = fingerprint;
+  L.guiReplayHashAfter = "";
+  flag("hashBefore");
+  return true;
+}
 function resourceGroups() { return [...new Set([...RGS, ...(Array.isArray(S.resourceGroups) ? S.resourceGroups : [])])]; }
 function ensureIdentityState() {
   for (const key of ["entraUsers", "entraGroups", "appRegistrations", "roleAssignments", "webApps"]) {
@@ -786,7 +811,7 @@ const CMDS = {
   growpart(a, i, u) { if (u !== "root") return fail("growpart: Permission denied"); const [dev, num] = a.filter((x) => !x.startsWith("-")); const d = (dev || "").replace("/dev/", ""); const pn = d + num; const P = this.L.parts[pn]; if (!P) return fail(`FAILED: partition=${num} cannot be grown: ${dev} does not have partition ${num}`, 2); const max = devSizeSeen(this.vm, d) - 2 * MiB; if (max - P.psize < 4 * MiB) return { out: `NOCHANGE: partition ${num} is size ${Math.round(P.psize / 512)}. it cannot be grown\n`, err: "", code: 1 }; const old = P.psize; P.psize = max; flag("growpart"); save(); return ok(`CHANGED: partition=${num} start=2048 old: size=${Math.round(old / 512)} end=${Math.round(old / 512) + 2048} new: size=${Math.round(max / 512)} end=${Math.round(max / 512) + 2048}\n`); },
   resize2fs(a, i, u) { if (u !== "root") return fail("resize2fs 1.46.5 (30-Dec-2021)\nresize2fs: Permission denied to resize filesystem"); const dev = a.find((x) => x.startsWith("/dev/")); const pn = (dev || "").replace("/dev/", ""); const P = this.L.parts[pn]; if (!P || !P.fs) return fail(`resize2fs 1.46.5 (30-Dec-2021)\nresize2fs: No such file or directory while trying to open ${dev}`); if (P.psize * 0.975 <= P.size + 4 * MiB) return ok(`resize2fs 1.46.5 (30-Dec-2021)\nThe filesystem is already ${Math.floor(P.size / 4096)} (4k) blocks long.  Nothing to do!\n\n`); P.size = P.psize * 0.975; flag("resize2fs"); save(); const m = Object.keys(this.L.mounts).find((k) => this.L.mounts[k] === pn); return ok(`resize2fs 1.46.5 (30-Dec-2021)\n${m ? `Filesystem at ${dev} is mounted on ${m}; on-line resizing required\nold_desc_blocks = 2, new_desc_blocks = 4\n` : ""}The filesystem on ${dev} is now ${Math.floor(P.size / 4096)} (4k) blocks long.\n\n`); },
   fallocate(a, i, u) { const k = a.indexOf("-l"); const sz = a[k + 1]; const file = a.filter((x, j) => j !== k && j !== k + 1)[0]; const m = /^([\d.]+)([KMGT]?)i?B?$/i.exec(sz || ""); if (!m) return fail(`fallocate: invalid length value specified`); const bytes = Math.floor(+m[1] * ({ "": 1, K: 1024, M: MiB, G: GiB, T: 1024 * GiB }[m[2].toUpperCase()])); const p = normPath(file, this.sess.cwd); const L = this.L; const dir = p.replace(/\/[^/]+$/, "") || "/"; if (!L.fs[dir]) return fail(`fallocate: cannot open ${file}: No such file or directory`); if (!canAccess(L, dir, u, "w")) return fail(`fallocate: cannot open ${file}: Permission denied`); const mnt = mountOf(L, p); const P = L.parts[L.mounts[mnt]]; if (bytes > P.size * 0.95 - fsUsed(L, mnt)) return fail(`fallocate: fallocate failed: No space left on device`); L.fs[p] = { t: "f", c: "", size: bytes, mode: 0o644, o: u, g: u === "root" ? "root" : u, m: now() }; save(); return ok(); },
-  sha256sum(a, stdin, u) { let out = ""; if (!a.length) return ok(hash64(stdin) + "  -\n"); for (const t of a) { const p = normPath(t.replace(/^~/, this.home(u)), this.sess.cwd); const n = this.L.fs[p]; if (!n) return fail(`sha256sum: ${t}: No such file or directory`); if (!canAccess(this.L, p, u, "r") || !pathTraversable(this.L, p, u)) return fail(`sha256sum: ${t}: Permission denied`); out += hash64((n.c || "") + "#" + (n.size || 0)) + "  " + t + "\n"; if (p === "/var/replays/grand_final.replay") { if (S.flags.dfAfter25 || S.flags.resize2fs) flag("hashAfter"); else flag("hashBefore"); } } return ok(out); },
+  sha256sum(a, stdin, u) { let out = ""; if (!a.length) return ok(hash64(stdin) + "  -\n"); for (const t of a) { const p = normPath(t.replace(/^~/, this.home(u)), this.sess.cwd); const n = this.L.fs[p]; if (!n) return fail(`sha256sum: ${t}: No such file or directory`); if (!canAccess(this.L, p, u, "r") || !pathTraversable(this.L, p, u)) return fail(`sha256sum: ${t}: Permission denied`); const fingerprint = hash64((n.c || "") + "#" + (n.size || 0)); out += fingerprint + "  " + t + "\n"; if (p === "/var/replays/grand_final.replay") recordReplayFingerprint(this.vm, fingerprint, !!(S.flags.dfAfter25 || S.flags.resize2fs)); } return ok(out); },
   md5sum(a, s, u) { const r = CMDS.sha256sum.call(this, a, s, u); r.out = r.out.replace(/^([0-9a-f]{32})[0-9a-f]{32}/gm, "$1"); return r; },
   grep(a, stdin, u) {
     const { f, rest } = flagsOf(a.filter((x) => x !== "--color=auto")); let pat = rest[0] ?? ""; const files = rest.slice(1); let ext = f.has("E");
@@ -1200,11 +1225,11 @@ const ICONS = {
   rep: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h7l3 3v8H3z"/><path d="m5.5 9 1.7 1.7L10.5 7"/></svg>',
   web: '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12"/></svg>',
 };
-const NAV = [["createResource", "Create a resource", "plus"], ["theory", "Section A · Theory", "rep"], ["home", "Home"], ["vms", "Virtual machines", "vm"], ["vnets", "Virtual networks", "net"], ["disks", "Disks", "disk"], ["monitor", "Monitor", "mon"], ["activity", "Activity log", "log"], ["browser", "Web browser", "web"], null, ["evidence", "Evidence", "ev"], ["report", "Results report", "rep"]];
+const NAV = [["createResource", "Create a resource", "plus"], ["theory", "Section A · Theory", "rep"], ["home", "Home"], ["vms", "Virtual machines", "vm"], ["vnets", "Virtual networks", "net"], ["disks", "Disks", "disk"], ["monitor", "Monitor", "mon"], ["linuxTools", "Linux GUI tools", "mon"], ["activity", "Activity log", "log"], ["browser", "Web browser", "web"], null, ["evidence", "Evidence", "ev"], ["report", "Results report", "rep"]];
 function renderRail() { $("#rail").innerHTML = NAV.map((n) => (n ? `<button type="button" data-nav="${n[0]}" class="${S.page === n[0] || (n[0] === "vms" && S.page === "vm") || (n[0] === "vms" && S.page === "create") ? "active" : ""}">${ICONS[n[2] || n[0]]}${n[1]}</button>` : '<div class="sep"></div>')).join(""); }
 function go(page, arg = null, tab = null) { S.page = page; S.pageArg = arg; if (tab) S.vmTab = tab; save(); renderRail(); renderBlade(); $("#blade").scrollTop = 0; }
 $("#rail").addEventListener("click", (e) => { const b = e.target.closest("[data-nav]"); if (b) go(b.dataset.nav); });
-$("#topSearch").addEventListener("keydown", (e) => { if (e.key !== "Enter") return; const q = e.target.value.toLowerCase(); if (/entra|directory|identity/.test(q)) go("entra"); else if (/access control|role assignment|iam|rbac/.test(q)) go("accessControl"); else if (/web ?app|app service/.test(q)) go("webapps"); else if (/create|resource/.test(q)) go("createResource"); else if (/virtual m|vm/.test(q)) go("vms"); else if (/net/.test(q)) go("vnets"); else if (/disk/.test(q)) go("disks"); else if (/monitor|metric/.test(q)) go("monitor"); else if (/log|activity/.test(q)) go("activity"); else { const vm = S.vms.find((v) => v.name.toLowerCase().includes(q)); if (vm) go("vm", vm.id, "overview"); else toast("No resources match “" + e.target.value + "”."); } e.target.value = ""; });
+$("#topSearch").addEventListener("keydown", (e) => { if (e.key !== "Enter") return; const q = e.target.value.toLowerCase(); if (/linux.*gui|gui.*linux/.test(q)) go("linuxTools"); else if (/entra|directory|identity/.test(q)) go("entra"); else if (/access control|role assignment|iam|rbac/.test(q)) go("accessControl"); else if (/web ?app|app service/.test(q)) go("webapps"); else if (/create|resource/.test(q)) go("createResource"); else if (/virtual m|vm/.test(q)) go("vms"); else if (/net/.test(q)) go("vnets"); else if (/disk/.test(q)) go("disks"); else if (/monitor|metric/.test(q)) go("monitor"); else if (/log|activity/.test(q)) go("activity"); else { const vm = S.vms.find((v) => v.name.toLowerCase().includes(q)); if (vm) go("vm", vm.id, "overview"); else toast("No resources match “" + e.target.value + "”."); } e.target.value = ""; });
 
 /* ---------------- portal pages ---------------- */
 function statusPill(st) { const c = st === "Running" ? "ok" : /Stopp|Dealloc/.test(st) ? "bad" : "warn"; return `<span class="pill ${c}">${esc(st)}</span>`; }
@@ -1213,6 +1238,7 @@ function renderBlade() {
   try {
     if (p === "createResource") { b.innerHTML = pageCreateResource(); bindCreateResource(); return; }
     if (p === "theory") { b.innerHTML = pageTheory(); bindTheory(); return; }
+    if (p === "linuxTools") { b.innerHTML = pageLinuxTools(); bindLinuxTools(); return; }
     if (p === "home") b.innerHTML = pageHome();
     else if (p === "vms") b.innerHTML = pageVms();
     else if (p === "create") { b.innerHTML = pageCreate(); bindCreate(); return; }
@@ -1239,12 +1265,13 @@ function pageHome() {
     <button class="card" type="button" data-go="theory"><b>Section A · Theory</b><span>Answer the written questions and save your responses</span></button>
     <button class="card" type="button" data-go="vms"><b>Virtual machines</b><span>${S.vms.length} deployed</span></button>
     <button class="card" type="button" data-go="browser"><b>Web browser</b><span>Open the control panel (Task 1.2)</span></button>
+    <button class="card" type="button" data-go="linuxTools"><b>Linux GUI tools</b><span>Complete many Linux tasks with graphical controls</span></button>
     <button class="card" type="button" data-go="report"><b>Results report</b><span>See your progress and copy your report</span></button>
   </div>
   <h2>How this lab works</h2>
   <div class="grid2">
     <div class="panel"><h3 style="margin-top:0">1 · Portal</h3><p class="muted" style="margin:0">Create and manage the VM, its network, static IP, disks and firewall rules, just as you would in the cloud portal.</p></div>
-    <div class="panel"><h3 style="margin-top:0">2 · Terminals</h3><p class="muted" style="margin:0">The dark panel below is your laptop’s PowerShell. Connect with <span class="mono">ssh user@public-ip</span>. Open a second terminal with “+ Terminal” to watch load in htop.</p></div>
+    <div class="panel"><h3 style="margin-top:0">2 · Linux tasks</h3><p class="muted" style="margin:0">Use <b>Linux GUI tools</b> for graphical alternatives, or practise the original commands in the terminal dock below. Both methods update the same simulated VM.</p></div>
     <div class="panel"><h3 style="margin-top:0">3 · Exam tasks</h3><p class="muted" style="margin:0">The panel on the right lists Tasks 1–3. Checks tick automatically as you work. Use <b>Capture</b> to save evidence.</p></div>
   </div>
   ${vm ? `<h2>Recent resources</h2>${vmTable()}` : ""}`;
@@ -1326,6 +1353,177 @@ function pageUsers() {
   return `<div class="crumb"><a data-go="createResource">Create a resource</a></div><h1>Linux users</h1><p class="sub">Create local accounts on a simulated virtual machine. These are Linux users, not Azure sign-in accounts.</p>
     ${S.vms.length ? `<div class="cmdbar"><button class="btn primary" type="button" id="createLinuxUser">+ Create user</button></div>${rows.length ? `<div class="tw"><table class="t"><thead><tr><th>Username</th><th>Virtual machine</th><th>Type</th><th>UID / GID</th><th>Home directory</th><th>Shell</th></tr></thead><tbody>${rows.map(({ vm, name, user }) => `<tr><td>${esc(name)}</td><td>${esc(vm.name)}</td><td>${user.sys ? "System" : "Standard"}</td><td>${user.uid} / ${user.gid}</td><td class="mono">${vm.linux?.fs?.[user.home]?.t === "d" ? esc(user.home) : "Not created"}</td><td class="mono">${esc(user.shell)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No user accounts found.</div>`}<div class="note" style="margin-top:12px">Passwords are not managed in this simulator. The guide’s service account can be created as a system user with no home directory and the <span class="mono">/usr/sbin/nologin</span> shell. You can also create it in the VM terminal with <span class="mono">useradd</span>.</div>` : `<div class="panel"><b>Create a virtual machine first.</b><p class="muted">Linux accounts belong to a VM.</p><button class="btn primary" type="button" data-go="create">Create a virtual machine</button></div>`}`;
 }
+let linuxGuiVmId = "";
+let linuxGuiRefreshTimer = null;
+const LINUX_GUI_SECTIONS = [
+  ["web", "Web server"],
+  ["files", "Files + users"],
+  ["monitor", "Performance"],
+  ["updates", "Updates"],
+  ["resize", "Disk resize"],
+  ["permissions", "Permissions"],
+  ["memo", "Text editor"],
+  ["firewall", "Firewall"],
+];
+function linuxGuiVm() { return vmById(linuxGuiVmId) || vm1(); }
+function pageLinuxTools() {
+  const vm = linuxGuiVm();
+  const section = LINUX_GUI_SECTIONS.some(([id]) => id === S.pageArg) ? S.pageArg : "web";
+  if (!vm) return `<div class="crumb"><a data-go="home">Home</a></div><h1>Linux GUI tools</h1><p class="sub">Graphical alternatives for the Linux practical tasks.</p><div class="panel"><b>Create a virtual machine first.</b><p class="muted">The tools work on the VM's simulated Linux state.</p><button class="btn primary" type="button" data-go="create">Create a virtual machine</button></div>`;
+  if (!vm.linux) vm.linux = newLinux(vm);
+  const L = vm.linux;
+  const nav = LINUX_GUI_SECTIONS.map(([id, title]) => `<button type="button" role="tab" data-linux-tool="${id}" class="${id === section ? "active" : ""}">${title}</button>`).join("");
+  let content = "";
+  if (section === "web") content = `<h2 style="margin-top:0">Task 1.2 · Web server</h2><p class="muted">Use the graphical network settings and web-server setup instead of running package and file commands.</p><dl class="kv"><dt>VM private IP</dt><dd class="mono">${esc(vm.privateIp)} (${esc(vm.ipAlloc)})</dd><dt>Public IP</dt><dd class="mono">${esc(vm.pip || "Not assigned")}</dd><dt>Web server</dt><dd>${L.services.nginx?.run ? "nginx running" : "Not installed"}</dd></dl><div class="cmdbar" style="border:0;padding:8px 0"><button class="btn" type="button" data-linux-action="set-ip">Configure static private IP</button><button class="btn" type="button" data-go="browser">Open lab browser</button></div><label for="gui_web_content">Control panel page</label><textarea id="gui_web_content" rows="4" style="font-family:var(--mono)">${esc(L.fs["/var/www/html/index.html"]?.c || "<h1>MetroTraffic Control Panel</h1>")}</textarea><p><button class="btn primary" type="button" data-linux-action="publish-web">${L.services.nginx?.run ? "Save page and start web server" : "Install web server and publish page"}</button></p>`;
+  else if (section === "files") content = `<h2 style="margin-top:0">Task 1.4 · Service log file</h2><p class="muted">Create the service account with the graphical user form, then create its log file and assign ownership here.</p><div class="cmdbar" style="border:0;padding:8px 0"><button class="btn" type="button" data-linux-action="create-camera-user">Create camera_bot account</button></div><dl class="kv"><dt>Account</dt><dd>${L.users.camera_bot ? `${L.users.camera_bot.sys ? "System account" : "Standard account"} · ${esc(L.users.camera_bot.shell)}` : "Not created yet"}</dd><dt>Log partition</dt><dd>${L.mounts["/var/traffic_logs"] ? "Mounted at /var/traffic_logs" : "Not mounted; complete Task 1.3 first"}</dd></dl><div class="form"><div class="field"><label for="gui_log_owner">File owner</label><select id="gui_log_owner">${Object.keys(L.users).map((name) => `<option ${name === "camera_bot" ? "selected" : ""}>${esc(name)}</option>`).join("")}</select></div><div class="field"><label for="gui_log_content">Log entry</label><input id="gui_log_content" type="text" value="CAM-01 vehicle_count=42"></div></div><p><button class="btn primary" type="button" data-linux-action="save-log">Create log file and set owner</button></p>`;
+  else if (section === "monitor") {
+    const load = loadNow(vm);
+    content = `<h2 style="margin-top:0">Task 2.1 · Performance monitor</h2><p class="muted">Start a simulated workload, then watch the live graphical readings. No terminal commands are needed.</p><div class="grid2"><div class="panel"><b>CPU</b><p class="mono" style="font-size:22px;margin:6px 0">${load.cpu.toFixed(1)}%</p><span class="muted">${L.load.cpu > now() ? "Stress workload running" : "Normal load"}</span></div><div class="panel"><b>Memory available</b><p class="mono" style="font-size:22px;margin:6px 0">${Math.max(0, load.avail / load.memTot * 100).toFixed(1)}%</p><span class="muted">${L.load.vm > now() ? "Memory workload running" : "Normal load"}</span></div><div class="panel"><b>Disk I/O</b><p class="mono" style="font-size:22px;margin:6px 0">${load.io.toFixed(1)}%</p><span class="muted">${L.load.hdd > now() ? "Stress workload running" : "Normal load"}</span></div></div><p class="mono muted">Reading timestamp: ${esc(sast())}</p><div class="cmdbar" style="border:0;padding:8px 0"><button class="btn primary" type="button" data-linux-action="stress-cpu">Start CPU test</button><button class="btn" type="button" data-linux-action="stress-memory">Start memory test</button><button class="btn" type="button" data-linux-action="stop-stress">Stop tests</button><button class="btn" type="button" data-go="monitor">Open VM metrics chart</button></div><p class="muted">Use the live readings to identify a resource above 90% and note the timestamp. Workload ends automatically.</p>`;
+  } else if (section === "updates") content = `<h2 style="margin-top:0">Task 2.2 · Software updater</h2><p class="muted">Refresh the package list and review available kernel/security updates. This screen only checks updates; it does not install them.</p><div class="cmdbar" style="border:0;padding:8px 0"><button class="btn primary" type="button" data-linux-action="check-updates">Check for updates</button></div>${L.aptUpdated ? `<div class="tw"><table class="t"><thead><tr><th>Package</th><th>Repository</th><th>Available version</th><th>Current version</th><th>Category</th></tr></thead><tbody>${UPGRADABLE.filter(([pkg]) => !L.upgraded).map(([pkg, repo, next, current]) => `<tr><td>${esc(pkg)}</td><td>${esc(repo)}</td><td>${esc(next)}</td><td>${esc(current)}</td><td>${/linux-/.test(pkg) ? "Kernel" : /security/.test(repo) ? "Security" : "Other"}</td></tr>`).join("") || '<tr><td colspan="5">No updates available.</td></tr>'}</tbody></table></div><div class="note warn" style="margin-top:12px">Review only. Do not select or install updates during this task.</div>` : `<div class="panel muted">Select “Check for updates” to refresh and view the available packages.</div>`}`;
+  else if (section === "resize") {
+    const disk = vm.dataDisks.find((item) => item.lun === S.replaysLun) || vm.dataDisks.find((item) => /replay/i.test(item.name));
+    const dev = disk ? devOfLun(vm, disk.lun) : "";
+    const partition = disk ? L.parts[dev + "1"] : null;
+    const usage = replayDiskUsage(vm);
+    const usageLabel = (snapshot) => snapshot ? `${(snapshot.used / GiB).toFixed(1)} / ${(snapshot.total / GiB).toFixed(1)} GiB · ${snapshot.percent}% used` : "Not recorded";
+    content = `<h2 style="margin-top:0">Task 2.3 · Expand the Replays filesystem</h2><p class="muted">First resize the managed disk in the portal. Record the disk usage and replay file checksum before resizing, then rescan and extend the Linux partition and filesystem. The GUI verifies the checksum is unchanged.</p>${disk ? `<dl class="kv"><dt>Disk</dt><dd>${esc(disk.name)}</dd><dt>Linux device / LUN</dt><dd class="mono">/dev/${dev} · ${disk.lun}</dd><dt>Disk size</dt><dd>${disk.size} GiB</dd><dt>Partition / filesystem</dt><dd>${partition ? `${(partition.psize / GiB).toFixed(1)} GiB / ${(partition.size / GiB).toFixed(1)} GiB` : "Not initialized"}</dd><dt>Filesystem usage now</dt><dd>${usageLabel(usage)}</dd><dt>Usage before resize</dt><dd>${usageLabel(L.guiReplayUsageBefore)}</dd><dt>Replay file</dt><dd>${L.fs["/var/replays/grand_final.replay"] ? "Present" : "Not found"}</dd><dt>Checksum before resize</dt><dd class="mono">${esc(L.guiReplayHashBefore || "Not recorded")}</dd><dt>Integrity check</dt><dd>${L.guiReplayHashAfter ? L.guiReplayHashBefore === L.guiReplayHashAfter ? "Checksum unchanged" : "Checksum changed" : "Not verified yet"}</dd></dl><div class="cmdbar" style="border:0;padding:8px 0"><button class="btn" type="button" data-linux-action="record-disk-before">Record disk usage + replay checksum</button><button class="btn" type="button" data-linux-action="open-disk-settings">Resize managed disk in portal</button><button class="btn primary" type="button" data-linux-action="grow-replays" ${!partition || disk.size <= (L.seen[dev] ?? disk.size) || !L.guiReplayHashBefore ? "disabled" : ""}>Rescan and grow partition + filesystem</button></div><div class="note">Compare the before/after usage and checksum, then capture this page as evidence.</div>` : `<div class="note warn">Load the FragFest scenario from the Exam tasks panel first to attach the Replays disk.</div>`}`;
+  } else if (section === "permissions") {
+    const dir = L.fs["/home/evidence/case_files"];
+    content = `<h2 style="margin-top:0">Task 3.1 · File permissions</h2><p class="muted">Inspect the evidence folder, then change its access permissions using the graphical file properties.</p><dl class="kv"><dt>Folder</dt><dd class="mono">/home/evidence/case_files</dd><dt>Current permissions</dt><dd class="mono">${dir ? (dir.mode & 0o777).toString(8).padStart(3, "0") : "Not available"}</dd><dt>Owner</dt><dd>${esc(dir?.o || "—")}</dd><dt>Files</dt><dd>${Object.keys(L.fs).filter((path) => path.startsWith("/home/evidence/case_files/")).length}</dd></dl><div class="cmdbar" style="border:0;padding:8px 0"><button class="btn" type="button" data-linux-action="inspect-case-files">Inspect current permissions</button><button class="btn primary" type="button" data-linux-action="lock-case-files" ${!dir ? "disabled" : ""}>Set owner root and permissions 700</button></div><p class="muted">Mode 700 gives the owner full access and removes access for group and others.</p>`;
+  } else if (section === "memo") content = `<h2 style="margin-top:0">Task 3.3 · Text editor</h2><p class="muted">Write and save the security memo in the graphical editor. Include all four sections requested in the task.</p><label for="gui_memo">~/security_memo.txt</label><textarea id="gui_memo" rows="12" placeholder="Vulnerability and risk&#10;&#10;Immediate actions&#10;&#10;Long-term recommendations&#10;&#10;Verification steps">${esc(L.fs[`/home/${vm.admin}/security_memo.txt`]?.c || "")}</textarea><p><button class="btn primary" type="button" data-linux-action="save-memo">Save memo</button></p>`;
+  else if (section === "firewall") content = `<h2 style="margin-top:0">Task 3.4 · Firewall settings</h2><p class="muted">Record the current listening ports, allow SSH, block FTP, then enable and verify the firewall. The VM's network security group must also allow inbound SSH (22); a Linux firewall rule cannot override a cloud network rule.</p><dl class="kv"><dt>Firewall</dt><dd>${L.ufw.enabled ? "Active" : "Inactive"}</dd><dt>Listening ports</dt><dd class="mono">${listening(vm).map((item) => item.p).join(", ")}</dd><dt>Rules</dt><dd>${L.ufw.rules.length ? L.ufw.rules.map((rule) => `${rule.port}/${rule.action}`).map(esc).join(", ") : "No rules"}</dd></dl><div class="cmdbar" style="border:0;padding:8px 0"><button class="btn" type="button" data-linux-action="record-ports">Record open ports</button><button class="btn primary" type="button" data-linux-action="apply-firewall">Allow SSH, deny FTP, enable firewall</button><button class="btn" type="button" data-linux-action="verify-firewall">Test SSH and FTP access</button></div><p id="gui_firewall_result" class="muted" role="status">${S.linuxGuiFirewallResult || ""}</p>`;
+  return `<div class="crumb"><a data-go="home">Home</a> › Linux GUI tools</div><h1>Linux GUI tools</h1><p class="sub">Graphical alternatives for the practical tasks. Changes here use the same simulated Linux state as the terminal. These tools do not change a real computer.</p><div class="field" style="max-width:560px;margin:12px 0"><label for="linuxGuiVm">Virtual machine</label><select id="linuxGuiVm">${S.vms.map((item) => `<option value="${esc(item.id)}" ${item.id === vm.id ? "selected" : ""}>${esc(item.name)}</option>`).join("")}</select></div><div class="tabs" role="tablist">${nav}</div><section class="panel">${content}</section><p style="margin-top:12px"><button class="btn" type="button" id="captureLinuxGui">Capture this screen as evidence</button></p>`;
+}
+function bindLinuxTools() {
+  clearInterval(linuxGuiRefreshTimer);
+  $("#linuxGuiVm")?.addEventListener("change", (event) => { linuxGuiVmId = event.target.value; renderBlade(); });
+  $("#blade").querySelectorAll("[data-linux-tool]").forEach((button) => button.addEventListener("click", () => { S.pageArg = button.dataset.linuxTool; save(); renderBlade(); }));
+  $("#captureLinuxGui")?.addEventListener("click", () => captureEvidence("portal"));
+  $("#blade").querySelectorAll("[data-linux-action]").forEach((button) => button.addEventListener("click", () => runLinuxGuiAction(linuxGuiVm(), button.dataset.linuxAction)));
+  if (S.pageArg === "monitor") {
+    linuxGuiRefreshTimer = setInterval(() => {
+      if (S.page !== "linuxTools" || S.pageArg !== "monitor") { clearInterval(linuxGuiRefreshTimer); return; }
+      const vm = linuxGuiVm();
+      if (vm?.status === "Running") {
+        const load = loadNow(vm);
+        if (vm.linux.load.cpu > now() && load.cpu > 90) flag("cpuObserved");
+        if (vm.linux.load.vm > now()) flag("memObserved");
+        if (load.cpu > 90 || load.io > 90) flag("metricsHigh");
+        vm.linux.guiPerformanceObservedAt = now();
+      }
+      renderBlade();
+    }, 1500);
+  }
+}
+function runLinuxGuiAction(vm, action) {
+  if (!vm?.linux) { toast("Create a running virtual machine first."); return; }
+  const L = vm.linux;
+  if (action === "set-ip") { ipModal(vm); return; }
+  if (action === "publish-web") {
+    if (vm.status !== "Running") { toast("Start the virtual machine before configuring its web server."); return; }
+    const content = $("#gui_web_content").value;
+    L.pkgs.nginx = "1.18.0-6ubuntu14.6";
+    L.services.nginx = { en: true, run: true };
+    L.fs["/var/www/html"] = L.fs["/var/www/html"] || { t: "d", mode: 0o755, o: "root", g: "root", m: now() };
+    L.fs["/var/www/html/index.html"] = { t: "f", c: content, size: content.length, mode: 0o644, o: "root", g: "root", m: now() };
+    if (vm.privateIp === "10.0.0.50") flag("ipShown50");
+    act("Linux GUI: install nginx and publish control panel", vm.name);
+    save(); renderDrawer(); renderBlade(); toast("Web server is running and the control panel was saved.");
+  } else if (action === "create-camera-user") {
+    createLinuxUserModal("camera_bot"); return;
+  } else if (action === "save-log") {
+    const owner = $("#gui_log_owner").value;
+    if (!L.users.camera_bot) { toast("Create the camera_bot account first."); return; }
+    if (!L.mounts["/var/traffic_logs"]) { toast("Complete the graphical disk setup for /var/traffic_logs first."); return; }
+    const path = "/var/traffic_logs/cam_feed_01.log";
+    const content = $("#gui_log_content").value + "\n";
+    L.fs[path] = { t: "f", c: content, size: content.length, mode: 0o644, o: owner, g: owner, m: now() };
+    act("Linux GUI: create camera feed log", `${path} owned by ${owner}`);
+    save(); renderDrawer(); renderBlade(); toast("The camera feed log file was saved.");
+  } else if (action === "stress-cpu" || action === "stress-memory") {
+    if (vm.status !== "Running") { toast("Start the virtual machine before creating load."); return; }
+    L.pkgs["stress-ng"] = "0.13.12-2ubuntu1";
+    L.load[action === "stress-cpu" ? "cpu" : "vm"] = now() + 30000;
+    act(`Linux GUI: start ${action === "stress-cpu" ? "CPU" : "memory"} test`, vm.name);
+    save(); renderBlade(); toast("Test started. Keep this live monitor open to observe the readings.");
+  } else if (action === "stop-stress") {
+    L.load.cpu = L.load.vm = L.load.hdd = 0;
+    save(); renderBlade(); toast("Performance tests stopped.");
+  } else if (action === "check-updates") {
+    L.aptUpdated = true;
+    flag("aptUpdate"); flag("aptList");
+    act("Linux GUI: refresh package list and review updates", vm.name);
+    save(); renderDrawer(); renderBlade();
+  } else if (action === "record-disk-before") {
+    if (!S.scenario2) { toast("Load the FragFest scenario first."); return; }
+    const usage = replayDiskUsage(vm);
+    const fingerprint = replayFingerprint(vm);
+    if (!fingerprint) { toast("The replay file is missing; load the FragFest scenario before recording the baseline."); return; }
+    if (!usage) { toast("Mount the Replays filesystem before recording its usage."); return; }
+    L.guiReplayUsageBefore = usage;
+    L.guiReplayHashBefore = fingerprint; L.guiReplayHashAfter = "";
+    flag("dfBefore99", usage.percent >= 98); flag("hashBefore");
+    save(); renderDrawer(); renderBlade();
+    toast(`Disk usage (${usage.percent}%) and replay checksum recorded. Resize the managed disk before extending Linux.`);
+  } else if (action === "open-disk-settings") {
+    go("vm", vm.id, "disks");
+  } else if (action === "grow-replays") {
+    const disk = vm.dataDisks.find((item) => item.lun === S.replaysLun) || vm.dataDisks.find((item) => /replay/i.test(item.name));
+    if (!disk) { toast("The Replays disk is not available. Load the FragFest scenario first."); return; }
+    const dev = devOfLun(vm, disk.lun); const partition = L.parts[dev + "1"];
+    if (!partition || disk.size <= (L.seen[dev] ?? disk.size)) { toast("Resize the managed disk in the portal first."); return; }
+    if (!L.guiReplayHashBefore) { toast("Record the replay checksum before extending the disk."); return; }
+    L.seen[dev] = disk.size;
+    partition.psize = disk.size * GiB - 2 * MiB;
+    partition.size = partition.psize * 0.975;
+    const intact = recordReplayFingerprint(vm, replayFingerprint(vm), true);
+    flag("growpart"); flag("resize2fs"); flag("dfAfter25", disk.size >= 25 && partition.size > 20 * GiB);
+    act("Linux GUI: rescan and extend Replays partition and filesystem", vm.name);
+    save(); renderDrawer(); renderBlade();
+    toast(intact ? "The partition and filesystem were expanded. The replay checksum is unchanged." : "The partition and filesystem were expanded, but the replay checksum did not match its saved baseline.");
+  } else if (action === "inspect-case-files") {
+    const dir = L.fs["/home/evidence/case_files"];
+    if (!dir) { toast("Load the Barrister scenario first."); return; }
+    if ((dir.mode & 0o777) === 0o755) flag("caseBefore");
+    toast(`Current folder permissions: ${(dir.mode & 0o777).toString(8).padStart(3, "0")} · owner ${dir.o}`);
+    renderDrawer(); renderBlade();
+  } else if (action === "lock-case-files") {
+    const dir = L.fs["/home/evidence/case_files"];
+    if (!dir) { toast("Load the Barrister scenario first."); return; }
+    if ((dir.mode & 0o777) === 0o755) flag("caseBefore");
+    dir.mode = 0o700; dir.o = "root"; dir.g = "root"; dir.m = now();
+    act("Linux GUI: restrict case_files permissions", vm.name);
+    save(); renderDrawer(); renderBlade(); toast("case_files is now private to root (700).");
+  } else if (action === "save-memo") {
+    const content = $("#gui_memo").value;
+    const path = `/home/${vm.admin}/security_memo.txt`;
+    L.fs[path] = { t: "f", c: content, size: content.length, mode: 0o644, o: vm.admin, g: vm.admin, m: now() };
+    act("Linux GUI: save security memo", `${vm.name} ${path}`);
+    save(); renderDrawer(); renderBlade(); toast("Memo saved. Check that it covers risk, immediate actions, long-term recommendations, and verification.");
+  } else if (action === "record-ports") {
+    if (listening(vm).some((item) => item.p === 21)) flag("ftpBefore");
+    toast("Listening ports recorded. FTP is listening before the firewall change.");
+    renderDrawer();
+  } else if (action === "apply-firewall") {
+    const setRule = (port, label, decision) => {
+      const existing = L.ufw.rules.find((rule) => rule.port === port);
+      if (existing) { existing.action = decision; existing.label = label; }
+      else L.ufw.rules.push({ port, label, action: decision, comment: "" });
+    };
+    setRule(22, "22/tcp", "allow"); setRule(21, "21/tcp", "deny");
+    L.ufw.enabled = true;
+    act("Linux GUI: allow SSH and block FTP", vm.name);
+    save(); renderDrawer(); renderBlade(); toast("Firewall enabled: SSH allowed and FTP denied.");
+  } else if (action === "verify-firewall") {
+    const sshWorks = reach(vm, 22).ok;
+    const ftpBlocked = !reach(vm, 21).ok && L.ufw.enabled && L.ufw.rules.some((rule) => rule.port === 21 && rule.action === "deny");
+    if (sshWorks) flag("sshAfterUfw");
+    if (ftpBlocked) flag("tnc21Fail");
+    if (L.ufw.rules.some((rule) => rule.port === 21 && rule.action === "deny")) flag("ufwStatusShown");
+    S.linuxGuiFirewallResult = `SSH (22): ${sshWorks ? "reachable" : "not reachable"} · FTP (21): ${ftpBlocked ? "blocked" : "reachable"}`;
+    save(); renderDrawer(); renderBlade();
+  }
+}
 function vmTable() { return `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Status</th><th>Size</th><th>Public IP</th><th>Private IP</th></tr></thead><tbody>${S.vms.map((v) => `<tr><td><button class="link" type="button" data-vm="${v.id}">${esc(v.name)}</button></td><td>${esc(v.rg)}</td><td>${statusPill(v.status)}</td><td>${esc(v.size)}</td><td class="mono">${esc(v.pip || "–")}</td><td class="mono">${esc(v.privateIp)}</td></tr>`).join("")}</tbody></table></div>`; }
 function pageVms() { return `<div class="crumb"><a data-go="home">Home</a></div><h1>Virtual machines</h1><p class="sub">Subscription: Mock EISA lab · Quota used: ${S.vms.reduce((a, v) => a + sizeOf(v).vcpu, 0)} of ${QUOTA} vCPUs (South Africa North)</p><div class="cmdbar"><button class="btn primary" type="button" data-go="create">+ Create</button></div>${S.vms.length ? vmTable() : `<div class="panel"><b>No virtual machines yet.</b><p class="muted">Create one to start Task 1.1.</p><button class="btn primary" type="button" data-go="create">+ Create a virtual machine</button></div>`}`; }
 function pageVnets() { return `<div class="crumb"><a data-go="home">Home</a></div><h1>Virtual networks</h1><p class="sub">Create networks here or in the VM wizard. A network needs an address space and at least one subnet.</p><div class="cmdbar"><button class="btn primary" type="button" id="createVnet">+ Create</button></div>${S.vnets.length ? `<div class="tw"><table class="t"><thead><tr><th>Name</th><th>Resource group</th><th>Address space</th><th>Subnets</th><th>Location</th></tr></thead><tbody>${S.vnets.map((n) => `<tr><td>${esc(n.name)}</td><td>${esc(n.rg)}</td><td class="mono">${esc(n.space)}</td><td>${n.subnets.map((s) => `${esc(s.name)} <span class="mono muted">${esc(s.range)}</span>`).join("<br>")}</td><td>${esc(n.region)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="panel muted">No virtual networks yet. Create one here or during VM deployment.</div>`}`; }
@@ -1342,6 +1540,7 @@ function pageLinuxDiskManager(vm) {
           const part = vm.linux.parts[partition]; const mount = Object.entries(vm.linux.mounts).find(([, name]) => name === partition)?.[0];
           return `<tr><td class="mono">/dev/${partition}</td><td>${esc(part.fs || "Unformatted")}</td><td class="mono">${esc(part.uuid || "—")}</td><td class="mono">${esc(mount || "Not mounted")}${mount && hasPersistentFstabMount(vm, mount, partition) ? " · persistent" : ""}</td><td>${!part.fs ? `<button class="btn primary" type="button" data-format-part="${esc(partition)}" ${vm.status !== "Running" ? "disabled" : ""}>Format ext4</button>` : mount ? "Mounted" : `<label class="sr-only" for="disk-mount-${disk.lun}">Mount point for /dev/${esc(partition)}</label><input id="disk-mount-${disk.lun}" type="text" value="${disk.size === 8 ? "/var/traffic_logs" : ""}" placeholder="/data" style="max-width:180px" ${vm.status !== "Running" ? "disabled" : ""}><button class="btn primary" type="button" data-persist-mount="${esc(partition)}" data-lun="${disk.lun}" ${vm.status !== "Running" ? "disabled" : ""}>Mount + save permanently</button>`}</td></tr>`;
         }).join("")}</tbody></table></div>` : `<p class="muted">No partitions detected on this disk.</p><button class="btn primary" type="button" data-create-part="${disk.lun}" ${vm.status !== "Running" ? "disabled" : ""}>Create GPT partition</button>`}
+        ${partitions.length && disk.size > (vm.linux.seen[dev] ?? disk.size) ? `<p><button class="btn primary" type="button" data-expand-linux-disk="${disk.lun}" ${vm.status !== "Running" ? "disabled" : ""}>Rescan and grow partition + filesystem</button></p>` : ""}
       </section>`;
     }).join("") : `<div class="panel muted">No data disks are attached to this VM. Attach a disk from the Disks tab first.</div>`}
     <div class="note" style="margin-top:14px">To verify persistence, restart the VM and return here. A mount marked “persistent” is backed by a UUID entry in <span class="mono">/etc/fstab</span>.</div>`;
@@ -1625,14 +1824,14 @@ function webAppModal() {
     };
   });
 }
-function createLinuxUserModal() {
+function createLinuxUserModal(defaultName = "") {
   if (!S.vms.length) { toast("Create a virtual machine before creating a Linux user."); return; }
   modal(`<h2 style="margin:0">Create Linux user</h2><p class="muted" style="margin:0">Add a local account to a virtual machine.</p><div class="form">
     <div class="field"><label for="lu_vm">Virtual machine</label><select id="lu_vm">${S.vms.map((vm) => `<option value="${esc(vm.id)}">${esc(vm.name)} — ${esc(vm.rg)}</option>`).join("")}</select></div>
-    <div class="field"><label for="lu_name">Username *</label><input id="lu_name" type="text" autocomplete="off" maxlength="32"><div class="hint">Use lowercase letters, numbers, underscores, or hyphens; start with a letter or underscore.</div></div>
-    <div class="field"><label for="lu_type">Account type</label><select id="lu_type"><option value="standard">Standard user</option><option value="system">System service account</option></select></div>
-    <div class="field"><label for="lu_shell">Login shell</label><select id="lu_shell"><option value="/bin/bash">/bin/bash</option><option value="/bin/sh">/bin/sh</option><option value="/usr/sbin/nologin">/usr/sbin/nologin</option></select></div>
-    <div class="field"><label for="lu_home">Home directory</label><div><label><input id="lu_home" type="checkbox" checked> Create /home/&lt;username&gt;</label><div class="hint">System service accounts normally do not need a home directory.</div></div></div>
+    <div class="field"><label for="lu_name">Username *</label><input id="lu_name" type="text" autocomplete="off" maxlength="32" value="${esc(defaultName)}"><div class="hint">Use lowercase letters, numbers, underscores, or hyphens; start with a letter or underscore.</div></div>
+    <div class="field"><label for="lu_type">Account type</label><select id="lu_type"><option value="standard" ${defaultName ? "" : "selected"}>Standard user</option><option value="system" ${defaultName ? "selected" : ""}>System service account</option></select></div>
+    <div class="field"><label for="lu_shell">Login shell</label><select id="lu_shell"><option value="/bin/bash" ${defaultName ? "" : "selected"}>/bin/bash</option><option value="/bin/sh">/bin/sh</option><option value="/usr/sbin/nologin" ${defaultName ? "selected" : ""}>/usr/sbin/nologin</option></select></div>
+    <div class="field"><label for="lu_home">Home directory</label><div><label><input id="lu_home" type="checkbox" ${defaultName ? "" : "checked"}> Create /home/&lt;username&gt;</label><div class="hint">System service accounts normally do not need a home directory.</div></div></div>
     <div class="err" id="lu_err" role="alert"></div></div><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="lu_cancel">Cancel</button><button class="btn primary" type="button" id="lu_create">Create</button></div>`, () => {
     $("#lu_cancel").onclick = closeModal;
     $("#lu_type").onchange = () => {
@@ -1743,6 +1942,21 @@ function bindVm(vm) {
     const partition = button.dataset.persistMount;
     const input = $(`#disk-mount-${button.dataset.lun}`);
     persistDiskMount(vm, partition, input?.value || "");
+  }));
+  b.querySelectorAll("[data-expand-linux-disk]").forEach((button) => (button.onclick = () => {
+    const disk = vm.dataDisks.find((item) => item.lun === +button.dataset.expandLinuxDisk);
+    if (!disk) { toast("That data disk is no longer attached."); return; }
+    const dev = devOfLun(vm, disk.lun); const partition = vm.linux.parts[dev + "1"];
+    if (!partition || disk.size <= (vm.linux.seen[dev] ?? disk.size)) { toast("Resize the managed disk first."); return; }
+    vm.linux.seen[dev] = disk.size;
+    partition.psize = disk.size * GiB - 2 * MiB;
+    partition.size = partition.psize * 0.975;
+    if (disk.lun === S.replaysLun || /replay/i.test(disk.name)) {
+      flag("growpart"); flag("resize2fs"); flag("dfAfter25", disk.size >= 25 && partition.size > 20 * GiB);
+      recordReplayFingerprint(vm, replayFingerprint(vm), true);
+    }
+    act("Linux GUI: rescan and extend partition and filesystem", `${vm.name} /dev/${dev}1`);
+    save(); renderDrawer(); renderBlade(); toast(`Expanded /dev/${dev}1 to use the resized disk.`);
   }));
   b.querySelectorAll("[data-vm-overview]").forEach((button) => (button.onclick = () => go("vm", button.dataset.vmOverview, "overview")));
   b.querySelectorAll("[data-act]").forEach((x) => (x.onclick = () => vmAction(vm, x.dataset.act)));
@@ -1896,7 +2110,7 @@ const CHECKS = [
   { task: "t2", sub: "2.3", label: "Recorded the full disk before (df -h at 99%)", test: () => !!S.flags.dfBefore99 },
   { task: "t2", sub: "2.3", label: "Replays disk resized to 25 GiB in the portal", test: () => !!S.flags.portalResize25 },
   { task: "t2", sub: "2.3", label: "Partition and file system grown (growpart + resize2fs)", test: () => !!(S.flags.growpart && S.flags.resize2fs) },
-  { task: "t2", sub: "2.3", label: "df -h shows about 25G and the replay file is intact", test: () => !!(S.flags.dfAfter25 && L1()?.fs["/var/replays/grand_final.replay"]) },
+  { task: "t2", sub: "2.3", label: "df -h shows about 25G and the replay checksum is unchanged", test: () => { const L = L1(); return !!(S.flags.dfAfter25 && S.flags.hashBefore && S.flags.hashAfter && L?.fs["/var/replays/grand_final.replay"] && L.guiReplayHashBefore && L.guiReplayHashBefore === L.guiReplayHashAfter); } },
   { task: "t3", sub: "3.1", label: "Recorded case_files before the fix (ls -l showing 755)", test: () => !!S.flags.caseBefore },
   { task: "t3", sub: "3.1", label: "case_files is now 700 owned by root", test: () => { const n = L1()?.fs["/home/evidence/case_files"]; return !!(n && (n.mode & 0o777) === 0o700 && n.o === "root"); } },
   { task: "t3", sub: "3.2", label: "Vulnerability name and CVE recorded", test: () => /2010-20103/.test(S.research.cve) && /backdoor/i.test(S.research.name) },
@@ -1944,9 +2158,13 @@ function renderDrawer() {
     ${TASKS.map((t) => { const cs = CHECKS.filter((c) => c.task === t.id); const dn = cs.filter((c) => checkState(c) === "done").length; return `<details class="task" data-task="${t.id}" ${S.openTask === t.id ? "open" : ""}><summary><b>${esc(t.title)}</b><span class="count">${dn}/${cs.length}</span></summary><div class="tbody"><p class="brief">${esc(t.brief)}</p>
       ${t.scenario === "s2" ? (S.scenario2 ? `<div class="note">Scenario loaded: a 12 GiB Replays disk (LUN 1) is mounted at /var/replays and is 99% full.</div>` : `<div class="note warn">Before Task 2.3, load the scenario: it attaches a 12 GiB Replays disk to your VM and fills it to 99%.<br><button class="btn primary" type="button" id="loadS2" style="margin-top:6px" ${vm1()?.linux ? "" : "disabled"}>Load FragFest scenario</button></div>`) : ""}
       ${t.scenario === "s3" ? (S.scenario3 ? `<div class="note">Scenario loaded: /home/evidence/case_files (755) exists and ProFTPD 1.3.3c is listening on port 21.</div>` : `<div class="note warn">Load the scenario: it creates the evidence folder with weak permissions and installs the old FTP server.<br><button class="btn primary" type="button" id="loadS3" style="margin-top:6px" ${vm1()?.linux ? "" : "disabled"}>Load Barrister scenario</button></div>`) : ""}
-      ${t.subs.map(([no, name, desc, hint]) => `<div class="sub-task"><h4>${no} ${esc(name)}</h4><p class="brief" style="margin:0 0 6px">${esc(desc)}</p><ul class="checks">${CHECKS.filter((c) => c.sub === no).map((c) => { const st = checkState(c); return `<li class="${st}"><span class="m">${st === "done" ? "✓" : st === "bad" ? "✗" : "○"}</span><span>${esc(c.label)}</span></li>`; }).join("")}</ul>
+      ${t.subs.map(([no, name, desc, hint]) => {
+        const guiSection = { "1.2": "web", "1.4": "files", "2.1": "monitor", "2.2": "updates", "2.3": "resize", "3.1": "permissions", "3.3": "memo", "3.4": "firewall" }[no];
+        const guiButton = guiSection ? `<button class="btn" type="button" data-linux-guide="${guiSection}" style="margin:6px 0">Use graphical steps</button>` : no === "1.3" ? `<button class="btn" type="button" data-linux-guide="diskManager" style="margin:6px 0">Open Linux Disk Manager</button>` : "";
+        return `<div class="sub-task"><h4>${no} ${esc(name)}</h4><p class="brief" style="margin:0 0 6px">${esc(desc)}</p><ul class="checks">${CHECKS.filter((c) => c.sub === no).map((c) => { const st = checkState(c); return `<li class="${st}"><span class="m">${st === "done" ? "✓" : st === "bad" ? "✗" : "○"}</span><span>${esc(c.label)}</span></li>`; }).join("")}</ul>${guiButton}
         ${no === "3.2" ? `<div style="display:grid;gap:6px;margin-top:8px"><input type="text" id="rs_name" placeholder="Vulnerability name" value="${esc(S.research.name)}"><input type="text" id="rs_cve" placeholder="CVE ID" value="${esc(S.research.cve)}"><input type="text" id="rs_sev" placeholder="Severity / CVSS score" value="${esc(S.research.severity)}"><input type="text" id="rs_src" placeholder="Source URL" value="${esc(S.research.source)}"></div>` : ""}
-        ${S.practice ? `<details style="margin-top:6px"><summary class="muted" style="cursor:pointer;font-size:12px">Show hint</summary><div class="hintbox">${esc(hint)}</div></details>` : ""}</div>`).join("")}
+        ${S.practice ? `<details style="margin-top:6px"><summary class="muted" style="cursor:pointer;font-size:12px">Show terminal hint</summary><div class="hintbox">${esc(hint)}</div></details>` : ""}</div>`;
+      }).join("")}
     </div></details>`; }).join("")}
     <div style="padding:14px 16px;display:grid;gap:8px"><button class="btn primary" type="button" id="goReport">Results report</button><button class="btn" type="button" id="submitExam">Submit mock exam</button><button class="btn danger" type="button" id="resetLab">Reset the whole lab</button></div>`;
   d.scrollTop = top;
@@ -1962,6 +2180,14 @@ $("#drawer").addEventListener("click", (e) => {
   if (id === "submitExam") submitExam();
   if (id === "loadS2") loadScenario2();
   if (id === "loadS3") loadScenario3();
+  const gui = e.target.closest("[data-linux-guide]");
+  if (gui) {
+    if (gui.dataset.linuxGuide === "diskManager") {
+      const vm = vm1();
+      if (vm) go("vm", vm.id, "diskManager");
+      else { toast("Create a virtual machine first."); go("create"); }
+    } else { linuxGuiVmId = vm1()?.id || ""; go("linuxTools", gui.dataset.linuxGuide); }
+  }
   if (id === "resetLab") modal(`<h2 style="margin:0">Reset the whole lab?</h2><p>This deletes your VMs, networks, evidence, activity log and progress in this browser. It cannot be undone.</p><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn" type="button" id="rs_no">Cancel</button><button class="btn primary" type="button" id="rs_yes">Reset</button></div>`, () => { $("#rs_no").onclick = closeModal; $("#rs_yes").onclick = () => { const name = S.learner; S = freshState(); S.learner = name; save(); sessions.length = 0; newLocal(); closeModal(); renderAll(); toast("The lab was reset."); }; });
 });
 function loadScenario2() {
